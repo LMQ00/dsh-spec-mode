@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Spec Mode",
+    "description": "访谈式需求固化：草稿增量写入，工作树只读，退出后经用户确认落盘 AGENTS.md 与 docs/。"
+  }
+}

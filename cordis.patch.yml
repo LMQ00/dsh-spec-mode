@@ -1,0 +1,10 @@
+# Bundle patch for @local/dsh-spec-mode.
+#
+# One Host row. It declares no Config: the interview protocol, the draft file
+# name, and the AGENTS.md advisory budget are code-owned constants in
+# index.js. Everything else it needs (tools, systemPrompt, sessionProjections,
+# commands, userQuestions, planMode) is an injected or opportunistically read
+# Service from the surrounding composition.
+- insert:
+    - id: spec-mode
+      name: '@local/dsh-spec-mode'

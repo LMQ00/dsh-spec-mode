@@ -1,0 +1,31 @@
+{
+  "name": "@local/dsh-spec-mode",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Spec mode for the DeepSeek Harness: interview-driven requirements capture with a read-only working tree.",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "icon": "./icon.svg",
+  "files": [
+    "index.js",
+    "state.js",
+    "guard.js",
+    "advisories.js",
+    "prompt.js",
+    "cordis.patch.yml",
+    "selftest.mjs",
+    "README.md",
+    "docs/*.md",
+    "icon.svg",
+    "locale/*.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

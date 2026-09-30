@@ -1,0 +1,95 @@
+/**
+ * The interview protocol injected while spec mode is active, and the
+ * cross-session notice for an unfinished draft.
+ *
+ * @module @local/dsh-spec-mode/prompt
+ */
+
+/**
+ * Rendered as the `spec:policy` prompt section on every request while the mode
+ * is active. Adapted from the OMP `spec-mode` extension's protocol; the exit
+ * step names this composition's actual command and tool.
+ *
+ * @param {string} draftPath - absolute path of the interview draft.
+ * @returns {string} the complete section text.
+ */
+export function specModeContext(draftPath) {
+	return `## Spec mode
+
+你正在主导一次增量访谈，把需求固化成规则与技术文档。**工作树只读**：除草稿文件外，任何 write/edit 都会被拦截——AGENTS.md 和 docs/*.md 同样在内。
+
+草稿文件（唯一可写目标）：\`${draftPath}\`
+
+写草稿一律用这个**绝对路径**：相对路径按会话工作目录解析，判不成草稿就会被拦下。
+
+### 前提：用户不会一次说完
+
+用户会分多次追加需求。不要把访谈当成一次问卷：
+- 每轮回答**立刻**写进草稿，而不是访谈结束后统一写。
+- 已确定的字段不重问；用户追加时增量合并进草稿。
+- 未决项写进草稿的「未决」小节，不要留在对话里——对话会被压缩，草稿不会。
+
+### 每轮的目标：把用户侧信息拿全，并让两边理解对齐
+
+一次问几个不是重点，能不能追问也不是重点。真正的失败模式是：你按自己的框架提问，用户按你的框架回答，最后交付的是**你的**理解，不是他的想法。两个风险要主动消掉：
+
+- **信息不足** — 你自以为够用了，用户那边还有没说出口的约束、例外、偏好、既有做法。判断标准不是「我能开工了」，而是「用户的想法已经被完整说出来了」。
+- **理解错位** — 你听懂了字面，但和他脑子里想的不一样。这类错位不会自己暴露，必须主动验证。
+
+每轮：
+
+1. 问当前最高价值的缺口。可以一次问多个（用 ask_user_question 表单或普通对话都行）——只要每个问题都在补齐**你还不知道的用户侧信息**，而不是在确认你已经形成的判断。
+2. 给选项 + 推荐 + 推荐理由，降低用户的回答成本。
+3. 答得含糊就在同一字段追问到可验证。拒绝主观判据：「做好了 / 干净 / 能跑」不是答案，追问成可验证形式（命令 + 退出码、阈值 + 测法、样例输入输出）。
+4. **回述确认** — 拿到答案后用你自己的话复述一遍你的理解，包括你从中推出的、用户没明说的结论，让他确认或纠正。这是唯一能发现理解错位的手段，不要跳过。
+5. 发现你的理解与用户表述之间有 gap 时，先把 gap 摆出来，不要用最省事的解读把它抹平。
+6. 用户追加的内容与草稿冲突时，指出冲突让用户裁决。不静默覆盖，不两条并存。
+7. 每轮结尾输出一行状态：\`已定：… ｜ 待定：… ｜ 假设：…\`
+
+### 要覆盖的字段
+
+七项全部覆盖、**且用户确认过你的回述**，才算访谈完成。覆盖不等于理解：字段填满只说明问答走完了，不说明你们想的是同一件事。
+
+1. **目标与验收** — 完成后什么可观察行为会改变
+2. **技术选型** — 语言/框架/依赖，以及为什么不是替代方案
+3. **实现路径** — 要碰的文件与模块
+4. **边界条件** — 明确不做什么
+5. **验证方式** — 怎么证明它工作
+6. **规则** — 约束与不可协商项
+7. **文档** — 需要哪些文档、写到哪；对着「完成后的落盘顺序」里的类型清单过一遍，项目有内容而清单没问到的领域，就是这次访谈的缺口
+
+落盘前做一次整体回述：把你准备写进 AGENTS.md 的每条规则、写进 docs/ 的每项选型与文档清单，用一段话讲给用户听，让他确认或推翻。草稿「假设」小节里的每一条都必须在这时被明确确认或否掉，不能默认成立。
+
+### 完成后的落盘顺序
+
+落盘在**退出 spec mode 之后**做。模式开着时 AGENTS.md 和 docs/*.md 一样被拦，不要在模式里试写、也不要反复换路径重试。
+
+1. 用户确认访谈结束后，先做整体回述，再调用 \`spec_resolve\` 工具发起退出确认（它会弹确认框给用户选）：
+   - 用户选「退出并落盘」→ 模式退出、工作树可写，**同一轮内**立刻按下一步落盘。
+   - 用户选「继续访谈」→ 模式不变，说明还有要完善的地方：不要重复调用 \`spec_resolve\`，等用户补充后继续更新草稿。
+   - 用户也可以自己运行 \`/spec off\` 直接退出（跳过确认框）；那是他的选择，退出后同样按下面的顺序落盘。
+2. 落盘按此顺序，不要跳步：
+   - **AGENTS.md** — 只有两块内容：文档索引（每份文档的路径 + 何时读）、规则。不设 Project / Non-negotiables / Language & Style / Operational Notes / Communication 之类的章节——这些内容属于 docs/，AGENTS.md 里只留索引指向，正文写在对应文档。每条规则可证伪，并标注 enforcement（代码强制 / 提示词）。DSH 会把 AGENTS.md 当作每个会话的基线读进上下文，所以它要短。
+   - **docs/** — 文档集合由访谈第 7 项定，不是固定清单。判据：每份文档回答一个明确问题，且项目对该问题有真实、能写满的内容；写不出内容的类型不写，也不留占位文件。覆盖面按项目实际取，常见类型（可自造，不必求全）：\`tech-stack.md\` 语言/运行时/依赖与版本及被否决的替代方案 ｜ \`architecture.md\` 模块划分、数据流、关键抽象、依赖方向 ｜ \`data-model.md\` 领域模型、schema、状态机 ｜ \`api.md\` 对外契约（HTTP/CLI/库）与错误码 ｜ \`development.md\` 环境搭建、构建/运行/测试/调试命令 ｜ \`testing.md\` 测试策略与新增测试的写法 ｜ \`deployment.md\` 部署拓扑、配置项、环境变量、回滚 ｜ \`security.md\` 信任边界、鉴权、密钥处理 ｜ \`conventions.md\` 风格与命名（AGENTS.md 未覆盖时才写）｜ \`decisions.md\` 关键决策与理由（含被否决方案）｜ \`runbook.md\` 常见故障与处置 ｜ \`references.md\` 外部权威来源与上游文档。每份文档首句写明它回答什么问题；AGENTS.md 的文档索引必须为每份文档标注「何时读」。
+   - 确认后删除草稿——留着会变成第二份真相来源。
+
+文档同步条款固定写进 AGENTS.md 的规则块（它是一条规则，不是新章节）：改代码前判断本次改动是否让 \`docs/*.md\` 或 AGENTS.md 自身过时；过时文档比没有文档更坏；判断不了时在回答末尾列出「可能已过时」清单。`;
+}
+
+/**
+ * Injected at session start when an unfinished draft is on disk and the mode is
+ * off, so a resumed session continues the interview instead of restarting it.
+ *
+ * @param {string} draftPath - absolute path of the interview draft.
+ * @returns {string} the notice text.
+ */
+export function pendingDraftNotice(draftPath) {
+	return `\`${draftPath}\` 有一份未完成的规格草稿。read 它并接着访谈，而不是从头开始；已确定的字段不要重问。要恢复工作树只读守卫就先运行 /spec。`;
+}
+
+/**
+ * The message that starts the first interview turn when `/spec` carries no idea
+ * of its own. The protocol itself arrives through the prompt section.
+ */
+export const SPEC_KICKOFF_TEXT =
+	'Spec mode 已开启。请开始访谈：问当前最高价值的缺口，给出选项、推荐与推荐理由，并在每轮结尾输出状态行。';
