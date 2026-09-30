@@ -86,10 +86,3 @@ export function specModeContext(draftPath) {
 export function pendingDraftNotice(draftPath) {
 	return `\`${draftPath}\` 有一份未完成的规格草稿。read 它并接着访谈，而不是从头开始；已确定的字段不要重问。要恢复工作树只读守卫就先运行 /spec。`;
 }
-
-/**
- * The message that starts the first interview turn when `/spec` carries no idea
- * of its own. The protocol itself arrives through the prompt section.
- */
-export const SPEC_KICKOFF_TEXT =
-	'Spec mode 已开启。请开始访谈：问当前最高价值的缺口，给出选项、推荐与推荐理由，并在每轮结尾输出状态行。';

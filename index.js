@@ -7,7 +7,10 @@
  * `spec_resolve` presents the finished interview for the user's review before
  * leaving the mode and landing `AGENTS.md` plus `docs/*.md`.
  *
- * Enter and leave with `/spec [idea]` and `/spec off`. The state is a fold over
+ * Enter and leave with `/spec [idea]` and `/spec off`. A bare `/spec` only
+ * selects the mode and submits no message of its own, so the interview begins
+ * with whatever the user writes — inline after `/spec`, or as the next ordinary
+ * message. The state is a fold over
  * the session log (`command/run` + `command/done`, `tool/call` + `tool/result`),
  * so resume, fork, and replay restore it without a plugin-owned event type.
  *
@@ -18,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 
 import { agentsMdAdvisories, agentsMdWriteContent } from './advisories.js';
 import { classifyTarget, extractTargetPaths, isDestructiveTool, isWriteTool } from './guard.js';
-import { SPEC_KICKOFF_TEXT, pendingDraftNotice, specModeContext } from './prompt.js';
+import { pendingDraftNotice, specModeContext } from './prompt.js';
 import {
 	PROJECTION_KEY,
 	createSpecProjection,
@@ -226,6 +229,10 @@ export function apply(ctx) {
 				liveExits.delete(session);
 				ensureParentDir(draftPath);
 
+				// A bare `/spec` is a silent mode toggle: it submits nothing, so the
+				// interview starts only once the user supplies something to interview
+				// about — inline here, or as the next ordinary message (the
+				// `spec:policy` section is already in effect for that turn).
 				if (message !== '' || attachments.length > 0) {
 					agent.steer(
 						userMessage(
@@ -236,10 +243,12 @@ export function apply(ctx) {
 							{ kind: 'user' },
 						),
 					);
-				} else {
-					agent.followup(noticeMessage(SPEC_KICKOFF_TEXT, 'Spec mode on — 开始访谈'));
+					return { kind: 'success', text: `Spec mode on. 草稿：${draftPath}` };
 				}
-				return { kind: 'success', text: `Spec mode on. 草稿：${draftPath}` };
+				return {
+					kind: 'success',
+					text: `Spec mode on. 工作树只读；直接发消息即可开始访谈。草稿：${draftPath}`,
+				};
 			},
 		});
 	});
