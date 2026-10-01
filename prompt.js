@@ -2,7 +2,7 @@
  * The interview protocol injected while spec mode is active, and the
  * cross-session notice for an unfinished draft.
  *
- * @module @local/dsh-spec-mode/prompt
+ * @module dsh-spec-mode/prompt
  */
 
 /**

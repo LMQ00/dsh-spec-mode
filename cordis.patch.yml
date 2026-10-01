@@ -1,4 +1,4 @@
-# Bundle patch for @local/dsh-spec-mode.
+# Bundle patch for dsh-spec-mode.
 #
 # One Host row. It declares no Config: the interview protocol, the draft file
 # name, and the AGENTS.md advisory budget are code-owned constants in
@@ -7,4 +7,4 @@
 # Service from the surrounding composition.
 - insert:
     - id: spec-mode
-      name: '@local/dsh-spec-mode'
+      name: 'dsh-spec-mode'

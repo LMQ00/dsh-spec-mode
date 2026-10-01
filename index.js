@@ -14,7 +14,7 @@
  * the session log (`command/run` + `command/done`, `tool/call` + `tool/result`),
  * so resume, fork, and replay restore it without a plugin-owned event type.
  *
- * @module @local/dsh-spec-mode
+ * @module dsh-spec-mode
  */
 
 import { randomUUID } from 'node:crypto';
@@ -192,7 +192,7 @@ export function apply(ctx) {
 
 	ctx.inject(['commands'], (commandCtx) => {
 		commandCtx.commands.register({
-			definitionId: '@local/dsh-spec-mode',
+			definitionId: 'dsh-spec-mode',
 			name: COMMAND_NAME,
 			description: 'Spec mode: 访谈式需求固化 — 增量写草稿，工作树只读，退出后落盘 AGENTS.md 与技术文档',
 			input: { hint: '[off|初始想法]', attachments: true },

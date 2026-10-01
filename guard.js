@@ -2,7 +2,7 @@
  * Tool-call path predicate for spec mode: which targets a call names, and
  * whether each is the draft, a protocol path, or the working tree.
  *
- * @module @local/dsh-spec-mode/guard
+ * @module dsh-spec-mode/guard
  */
 
 import { resolve } from 'node:path';

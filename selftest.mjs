@@ -1,5 +1,5 @@
 /**
- * Dependency-free smoke test for the pure modules of @local/dsh-spec-mode.
+ * Dependency-free smoke test for the pure modules of dsh-spec-mode.
  * It exercises the parts that decide behavior — the draft anchor, the path
  * predicate, the projection fold, and the AGENTS.md advisory — without a Host.
  *

@@ -1,4 +1,4 @@
-# @local/dsh-spec-mode
+# dsh-spec-mode
 
 DSH 插件：由模型主导的增量访谈，把用户逐步浮现的需求固化成 **AGENTS.md 开发规范** +
 **`docs/` 技术文档**。

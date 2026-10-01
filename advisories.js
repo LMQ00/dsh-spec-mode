@@ -7,7 +7,7 @@
  * truncated or dropped rather than merely verbose — the same reason the line
  * budget exists here.
  *
- * @module @local/dsh-spec-mode/advisories
+ * @module dsh-spec-mode/advisories
  */
 
 /** Line budget above which AGENTS.md adherence measurably degrades. */

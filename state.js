@@ -19,7 +19,7 @@
  * mode from the log alone. `init` runs for the empty log; a unit uninterested in
  * an event returns the same state reference.
  *
- * @module @local/dsh-spec-mode/state
+ * @module dsh-spec-mode/state
  */
 
 import { existsSync, mkdirSync, statSync } from 'node:fs';
