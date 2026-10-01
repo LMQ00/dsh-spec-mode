@@ -7,8 +7,7 @@
 
 /**
  * Rendered as the `spec:policy` prompt section on every request while the mode
- * is active. Adapted from the OMP `spec-mode` extension's protocol; the exit
- * step names this composition's actual command and tool.
+ * is active. The exit step names this composition's actual command and tool.
  *
  * @param {string} draftPath - absolute path of the interview draft.
  * @returns {string} the complete section text.

@@ -1,5 +1,5 @@
 /**
- * Spec mode for the DeepSeek Harness — a port of the OMP `spec-mode` extension.
+ * Spec mode for the DeepSeek Harness.
  *
  * Spec mode is logged per-session collaboration state: while it is active, the
  * `spec:policy` prompt section carries an interview protocol, a monotonic tool

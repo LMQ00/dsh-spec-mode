@@ -4,8 +4,8 @@
  * Content-quality constraints stay prompt-level: nothing here blocks a write.
  * `@deepseek-ai/dsh-agent-instructions` reads `AGENTS.md` as a byte-budgeted
  * baseline when the deployment composes it, so an over-long rule file is
- * truncated or dropped rather than merely verbose — the same reason OMP
- * budgeted it by lines.
+ * truncated or dropped rather than merely verbose — the same reason the line
+ * budget exists here.
  *
  * @module @local/dsh-spec-mode/advisories
  */

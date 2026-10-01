@@ -1,7 +1,7 @@
 # @local/dsh-spec-mode
 
-OMP `spec-mode` 扩展的 DSH 移植版：由模型主导的增量访谈，把用户逐步浮现的需求固化成
-**AGENTS.md 开发规范** + **`docs/` 技术文档**。
+DSH 插件：由模型主导的增量访谈，把用户逐步浮现的需求固化成 **AGENTS.md 开发规范** +
+**`docs/` 技术文档**。
 
 - 入口：`index.js`（Host 插件，`export function apply(ctx)`）
 - 依赖：仅 `node:crypto` / `node:fs` / `node:os` / `node:path`。不 import 任何
@@ -49,3 +49,7 @@ OMP `spec-mode` 扩展的 DSH 移植版：由模型主导的增量访谈，把�
 ```
 node selftest.mjs      # 17 项纯逻辑断言，不需要 Host
 ```
+
+## 协议
+
+[MIT](LICENSE)
