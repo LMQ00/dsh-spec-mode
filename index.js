@@ -398,7 +398,7 @@ export function apply(ctx) {
 			if (isSpecActive(agent.session)) return;
 			const draftPath = draftPathFor(agent.session);
 			if (!draftHasContent(draftPath)) return;
-			agent.inject(noticeMessage(pendingDraftNotice(draftPath), '未完成的 spec 草稿'));
+			agent.inject(noticeMessage(pendingDraftNotice(draftPath), 'spec 草稿：可能已落盘'));
 		} catch {
 			// A session whose state cannot be read simply gets no notice.
 		}

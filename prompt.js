@@ -79,12 +79,17 @@ export function specModeContext(draftPath) {
 }
 
 /**
- * Injected at session start when an unfinished draft is on disk and the mode is
- * off, so a resumed session continues the interview instead of restarting it.
+ * Injected at session start when a draft is on disk and the mode is off. The
+ * draft file alone cannot say whether it is unfinished (the interview
+ * continues) or already landed with the delete step skipped, so the notice
+ * names both readings and how to tell them apart instead of asserting the file
+ * is unfinished.
  *
  * @param {string} draftPath - absolute path of the interview draft.
  * @returns {string} the notice text.
  */
 export function pendingDraftNotice(draftPath) {
-	return `\`${draftPath}\` 有一份未完成的规格草稿。read 它并接着访谈，而不是从头开始；已确定的字段不要重问。要恢复工作树只读守卫就先运行 /spec。`;
+	return `\`${draftPath}\` 是 spec mode 的访谈草稿，但本会话没有 spec 记录——它可能已经落盘、只是没被删掉。`
+		+ 'read 它并对照 AGENTS.md 与 docs/ 下已落盘的文档：已被取代就直接删掉它，未被取代才接着访谈，已确定的字段不要重问。'
+		+ '要恢复工作树只读守卫就先运行 /spec。';
 }
