@@ -6,11 +6,13 @@
  * `@deepseek-ai/dsh-agent-instructions` reads `AGENTS.md` as a byte-budgeted
  * baseline when the deployment composes it, so an over-long rule file is
  * truncated or dropped rather than merely verbose — the same reason the line
- * budget exists here. The writing checks encode three landing-protocol
- * requirements as a nudge at write time: every deliverable opens with a
- * plain-language lead a layperson can read, carries no code (terms stay welcome,
- * commands a reader can run stay too), and records a decision as the decision
- * alone, never together with the alternative it beat.
+ * budget exists here. The writing checks encode the landing protocol as a nudge
+ * at write time: every deliverable opens with a plain-language lead a layperson
+ * can read, code appears only as a step the reader performs (and then must say
+ * which file, what to execute, and what success looks like — commands and
+ * diagrams excepted), a decision is recorded as the decision alone, and
+ * `AGENTS.md` carries the rule block that keeps this standard alive inside the
+ * repository.
  *
  * @module dsh-spec-mode/advisories
  */
@@ -33,16 +35,9 @@ const NON_PROSE_LINE_RE = /^\s*(?:#{1,6}\s|```|\||>|[-*+]\s|\d+[.)]\s)/;
 /** Line shapes that introduce a labelled block, where a decision would be recorded. */
 const STRUCTURAL_LINE_RE = /^\s*(?:#{1,6}\s|\*\*|[-*+]\s|\d+[.)]\s)/;
 
-/** Source and config file extensions: a name carrying one of these is code. */
-const SOURCE_EXT = String.raw`(?:js|mjs|cjs|ts|tsx|jsx|py|go|rs|rb|php|java|kt|swift|json|toml|ya?ml|cfg|ini|lock|sql)`;
-
-/** A source or config file name, which a produced document never cites. */
-const FILE_REF = String.raw`\b[\w.-]+\.${SOURCE_EXT}\b`;
-
 /**
- * Words that start a command a reader can run. Reproduction steps and run
- * instructions belong in a document, so text hanging off one of these is never
- * reported as code.
+ * Words that start a command a reader can run. A command block is already a
+ * reproduction step, so it never needs the three-part explanation around it.
  */
 const COMMAND_WORDS = 'npm|pnpm|yarn|npx|node|deno|bun|git|python3?|pip3?|uv|cargo|rustc|go|make|cmake'
 	+ '|docker|kubectl|curl|wget|tar|unzip|ssh|scp|rsync|pwsh|powershell|bash|sh|zsh'
@@ -51,133 +46,34 @@ const COMMAND_WORDS = 'npm|pnpm|yarn|npx|node|deno|bun|git|python3?|pip3?|uv|car
 /** A line that begins with a command, ignoring a prompt prefix or a leading path. */
 const COMMAND_START_RE = new RegExp(`^(?:sudo\\s+)?(?:\\.{1,2}[\\\\/])?(?:${COMMAND_WORDS})\\b`, 'i');
 
-/** A command and its target file, as written mid-sentence. */
-const COMMAND_TARGET_RE = new RegExp(`\\b(?:${COMMAND_WORDS})\\s+[\\w./\\\\-]+\\.[\\w-]+`, 'gi');
+/** Fence tags that mean the block draws a picture instead of showing code. */
+const DIAGRAM_INFOS = new Set(['mermaid', 'dot', 'graphviz', 'plantuml', 'puml', 'text', 'txt', 'ascii']);
 
-/** A code-shaped span: a file name, a call, or an identifier. */
-const CODE_SPAN_RE = new RegExp(
-	[FILE_REF, String.raw`\w+\(\)`, String.raw`[a-z]+_[a-z_]+`, String.raw`[A-Z][A-Z0-9]*_[A-Z0-9_]+`, String.raw`[=;{}]`].join('|'),
-);
-
-/** A call written as `foo()`, or a constant in screaming case. These never stay. */
-const IDENTIFIER_REF_RE = new RegExp(
-	[String.raw`\b[A-Za-z_$][\w$]*(?:\.[\w$]+)*\(\)`, String.raw`\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b`].join('|'),
-);
-
-/** A source or config file name on its own. A listing may cite one. */
-const FILE_REF_RE = new RegExp(FILE_REF);
+/** Arrows and box drawing: the block is a picture even without a diagram tag. */
+const DIAGRAM_MARK_RE = /(?:-->|==>|→|⇢|←|─|│|┌|└|├|┐|┘|╰|╯)/;
 
 /**
- * Whether one line is a command a reader could run, ignoring a prompt prefix.
- * A slash command counts: it is what the reader types.
- * @param {string} line - the trimmed line.
- * @returns {boolean} true for a runnable command.
+ * Wording that tells a reader how to make a block run: where it goes, what to
+ * execute, or what success looks like.
  */
-function isCommandLine(line) {
-	const stripped = line.replace(/^(?:\$\s+|PS>\s+|>\s+)/, '').trim();
-	return stripped.startsWith('/') || COMMAND_START_RE.test(stripped);
-}
+const REPRODUCTION_CUE_RE = /(写进|写入|保存为|保存到|存成|放进|放到|新建|创建|执行|运行|跑一下|跑一遍|复现|命令|示例|输出|看到|结果|expect)/i;
+
+/** How many lines around a code block are read when looking for that wording. */
+const CUE_LINES_BEFORE = 3;
+const CUE_LINES_AFTER = 6;
 
 /**
- * The document's fenced blocks, each as its own list of inner lines.
- * @param {string} text - the written content.
- * @returns {string[][]} one entry per fenced block.
+ * The clauses the produced AGENTS.md must carry, each with the wording that
+ * marks it. The plugin's own writing requirements travel with the file — that is
+ * what keeps the next session in the repository writing this way.
  */
-function fencedBlocks(text) {
-	const blocks = [];
-	let current;
-	for (const line of text.split('\n')) {
-		if (/^\s*```/.test(line)) {
-			if (current === undefined) current = [];
-			else {
-				blocks.push(current);
-				current = undefined;
-			}
-			continue;
-		}
-		if (current !== undefined) current.push(line);
-	}
-	return blocks;
-}
-
-/**
- * The first fenced block that is source text rather than a runnable command. A
- * block counts as runnable when every line of it is a command, a flag or flag
- * continuation, or a shell comment — the shape a reproduction step takes.
- * @param {string} text - the written content.
- * @returns {string | undefined} the block's first line, when the block is source.
- */
-function firstSourceBlock(text) {
-	for (const block of fencedBlocks(text)) {
-		const lines = block.map((line) => line.trim()).filter((line) => line !== '');
-		if (lines.length === 0) continue;
-		const runnable = lines.every((line) => isCommandLine(line) || /^[-|>#]/.test(line));
-		if (!runnable) return lines[0];
-	}
-	return undefined;
-}
-
-/**
- * The document without its fenced blocks, so the prose passes do not report a
- * block twice.
- * @param {string} text - the written content.
- * @returns {string} the content with fences and their bodies removed.
- */
-function withoutFences(text) {
-	const kept = [];
-	let inFence = false;
-	for (const line of text.split('\n')) {
-		if (/^\s*```/.test(line)) {
-			inFence = !inFence;
-			continue;
-		}
-		if (!inFence) kept.push(line);
-	}
-	return kept.join('\n');
-}
-
-/**
- * Split inline spans out of the prose. Spans are examined on their own, because
- * a span holding a command stays and a span holding an identifier does not.
- * @param {string} text - the content, already stripped of fenced blocks.
- * @returns {{ spans: string[], rest: string }} the span contents and the prose.
- */
-function splitSpans(text) {
-	const spans = [];
-	const rest = text.replace(/`([^`\n]+)`/g, (_match, span) => {
-		spans.push(String(span));
-		return ' ';
-	});
-	return { spans, rest };
-}
-
-/**
- * One line with every mid-sentence command and its target removed, so a run
- * instruction does not read as a file-name citation.
- * @param {string} line - the trimmed line.
- * @returns {string} the line without command segments.
- */
-function withoutCommandTargets(line) {
-	return line.replace(COMMAND_TARGET_RE, ' ');
-}
-
-/**
- * The first plain-text line citing code, skipping lines that run as commands. A
- * table row may cite a file name — that is a listing, an address — but never a
- * call or a constant.
- * @param {string} text - the prose, already stripped of fences and spans.
- * @returns {string | undefined} the offending line, when there is one.
- */
-function firstCodeReference(text) {
-	for (const raw of text.split('\n')) {
-		const line = raw.trim();
-		if (line === '' || isCommandLine(line)) continue;
-		const stripped = withoutCommandTargets(line);
-		if (IDENTIFIER_REF_RE.test(stripped)) return line;
-		if (!line.includes('|') && FILE_REF_RE.test(stripped)) return line;
-	}
-	return undefined;
-}
+const DOC_RULE_MARKERS = [
+	['改代码前同步过时文档', /过时/],
+	['代码只在要人照做时出现，且跟着复现步骤', /复现/],
+	['首段白话导读', /(导读|白话|外行)/],
+	['讲流程要画真的图', /图/],
+	['决策只记结论', /(决策只记结论|只记结论)/],
+];
 
 /**
  * Wording that means a decision was written down together with the alternative
@@ -205,17 +101,77 @@ function excerptOf(line) {
 }
 
 /**
- * One code advisory message, quoting the line that triggered it.
- * @param {string} label - what kind of code was found.
- * @param {string} line - the offending line, already trimmed.
- * @returns {string} the advisory text.
+ * Whether one line is a command a reader could run, ignoring a prompt prefix.
+ * A slash command counts: it is what the reader types.
+ * @param {string} line - the trimmed line.
+ * @returns {boolean} true for a runnable command.
  */
-function codeMessage(label, line) {
-	return `Spec mode: 文档里出现了${label}：「${excerptOf(line)}」。`
-		+ '产出文档写人话——源码、函数名、字段名、配置文件名、调用形式都不该出现；'
-		+ '命令可以有（复现某一步、要执行什么时照原样给），术语也可以用。'
-		+ '要指代代码里的东西，就用它在系统里干的那件事来称呼。'
-		+ '见提示词「产出文档的写法：要说人话，不写代码」。';
+function isCommandLine(line) {
+	const stripped = line.replace(/^(?:\$\s+|PS>\s+|>\s+)/, '').trim();
+	return stripped.startsWith('/') || COMMAND_START_RE.test(stripped);
+}
+
+/**
+ * The document's fenced blocks, each with where it sits and what its info string
+ * claims to be.
+ * @param {string} text - the written content.
+ * @returns {{ info: string, lines: string[], start: number, end: number }[]} the blocks.
+ */
+function fencedBlocks(text) {
+	const lines = text.split('\n');
+	const blocks = [];
+	let open;
+	for (let index = 0; index < lines.length; index += 1) {
+		const fence = /^\s*```\s*(\S*)/.exec(lines[index]);
+		if (fence === null) {
+			if (open !== undefined) open.lines.push(lines[index]);
+			continue;
+		}
+		if (open === undefined) {
+			open = { info: fence[1].toLowerCase(), lines: [], start: index, end: index };
+			continue;
+		}
+		open.end = index;
+		blocks.push(open);
+		open = undefined;
+	}
+	if (open !== undefined) {
+		// An unterminated fence still runs to the end of the document.
+		open.end = lines.length - 1;
+		blocks.push(open);
+	}
+	return blocks;
+}
+
+/**
+ * The non-empty lines of a block, trimmed.
+ * @param {{ lines: string[] }} block - one fenced block.
+ * @returns {string[]} its content lines.
+ */
+function blockBody(block) {
+	return block.lines.map((line) => line.trim()).filter((line) => line !== '');
+}
+
+/**
+ * Whether a block runs as commands — every line a command, a flag, a flag
+ * continuation, or a shell comment.
+ * @param {{ info: string, lines: string[] }} block - one fenced block.
+ * @returns {boolean} true for a command block.
+ */
+function isCommandBlock(block) {
+	const body = blockBody(block);
+	return body.length > 0 && body.every((line) => isCommandLine(line) || /^[-|>#]/.test(line));
+}
+
+/**
+ * Whether a block draws a picture: tagged as a diagram format, or built from
+ * arrows and box drawing.
+ * @param {{ info: string, lines: string[] }} block - one fenced block.
+ * @returns {boolean} true for a diagram block.
+ */
+function isDiagramBlock(block) {
+	if (DIAGRAM_INFOS.has(block.info)) return true;
+	return DIAGRAM_MARK_RE.test(block.lines.join('\n'));
 }
 
 /**
@@ -286,6 +242,24 @@ export function agentsMdAdvisories(content) {
 }
 
 /**
+ * Advisory messages for an AGENTS.md whose rule block is missing the writing
+ * rules the landing protocol requires.
+ * @param {string} content - the exact content being written.
+ * @returns {string[]} zero or more advisory messages.
+ */
+export function documentationRulesAdvisories(content) {
+	const text = typeof content === 'string' ? content : '';
+	if (text.trim() === '') return [];
+	const missing = DOC_RULE_MARKERS.filter(([, pattern]) => !pattern.test(text)).map(([label]) => label);
+	if (missing.length === 0) return [];
+	return [
+		`Spec mode: AGENTS.md 的规则块缺少文档相关规则：${missing.join('、')}。`
+			+ '这几条要跟着落盘文件传下去（自举）——改代码前同步过时文档、代码跟着复现步骤、'
+			+ '首段白话导读、讲流程要画真的图、决策只记结论。见提示词「完成后的落盘顺序」的文档规则块。',
+	];
+}
+
+/**
  * The document's opening region: every line before its first level-2 heading,
  * with fenced code excluded.
  * @param {string} text - the written content.
@@ -340,8 +314,39 @@ export function plainLanguageAdvisories(kind, content) {
 	return [
 		`Spec mode: ${subject}开头没有外行读得懂的白话导读。`
 			+ `第一个小节标题之前要有至少一段 ${PLAIN_LEAD_MIN_CHARS} 字以上的白话（不含代码、反引号、字段名、路径），`
-			+ '说明它回答什么问题、谁在什么场景下读、读完能做什么。写法见提示词「产出文档的写法：要说人话，不写代码」。',
+			+ '说明它回答什么问题、谁在什么场景下读、读完能做什么。写法见提示词「产出文档的写法：说人话」。',
 	];
+}
+
+/**
+ * Advisory messages for a code block that does not say how to make it run. A
+ * command block already is a reproduction step, and a diagram carries its own
+ * reading note, so neither is reported.
+ * @param {string} content - the exact content being written.
+ * @returns {string[]} zero or more advisory messages.
+ */
+export function reproductionAdvisories(content) {
+	const text = typeof content === 'string' ? content : '';
+	if (text.trim() === '') return [];
+	const lines = text.split('\n');
+	for (const block of fencedBlocks(text)) {
+		if (isCommandBlock(block) || isDiagramBlock(block)) continue;
+		const body = blockBody(block);
+		if (body.length === 0) continue;
+		const around = [
+			...lines.slice(Math.max(0, block.start - CUE_LINES_BEFORE), block.start),
+			...lines.slice(block.end + 1, block.end + 1 + CUE_LINES_AFTER),
+		].join('\n');
+		if (REPRODUCTION_CUE_RE.test(around)) continue;
+		return [
+			`Spec mode: 这段代码旁边没有复现步骤：「${excerptOf(body[0])}」。`
+				+ '代码能不出就不出——要靠贴代码讲实现，说明这段逻辑还没讲清；真要给读者照做的步骤，'
+				+ '就补上三件事：写进哪个文件（或直接在哪执行）、执行什么、看到什么算成功。'
+				+ '命令行与流程图不必（命令行本身就是步骤，图要另配白话读图说明）。'
+				+ '见提示词「产出文档的写法：说人话」。',
+		];
+	}
+	return [];
 }
 
 /**
@@ -367,67 +372,11 @@ export function decisionRationaleAdvisories(content) {
 }
 
 /**
- * Advisory messages for a deliverable that carries code. Terms are welcome and
- * commands a reader can run stay — a reproduction step or a run instruction
- * belongs in a document. What does not: source text, source and config file
- * names, function and field names, calls written as `foo()`, and constants.
- * @param {string} content - the exact content being written.
- * @returns {string[]} zero or more advisory messages.
- */
-export function codeFreeAdvisories(content) {
-	const text = typeof content === 'string' ? content : '';
-	if (text.trim() === '') return [];
-	const messages = [];
-	const source = firstSourceBlock(text);
-	if (source !== undefined) messages.push(codeMessage('源码代码块', source));
-	const prose = withoutFences(text);
-	const { spans, rest } = splitSpans(prose);
-	for (const span of spans) {
-		const line = span.trim();
-		if (line === '' || isCommandLine(line) || !CODE_SPAN_RE.test(line)) continue;
-		messages.push(codeMessage('行内代码（源码文件名、函数名或标识符）', line));
-		break;
-	}
-	const reference = firstCodeReference(rest);
-	if (reference !== undefined) messages.push(codeMessage('代码引用（源码文件名、函数名或常量）', reference));
-	return messages;
-}
-
-/**
- * The clauses the produced AGENTS.md must carry, each with the wording that
- * marks it. The plugin's own documentation requirements travel with the file —
- * that is what keeps the next session in the repository writing this way.
- */
-const DOC_RULE_MARKERS = [
-	['改代码前同步过时文档', /过时/],
-	['文档不写代码（术语可用、命令可有）', /(不写代码|不出现代码)/],
-	['首段白话导读', /(导读|白话|外行)/],
-	['决策只记结论', /(决策只记结论|只记结论)/],
-];
-
-/**
- * Advisory messages for an AGENTS.md whose rule block is missing the
- * documentation rules the landing protocol requires.
- * @param {string} content - the exact content being written.
- * @returns {string[]} zero or more advisory messages.
- */
-export function documentationRulesAdvisories(content) {
-	const text = typeof content === 'string' ? content : '';
-	if (text.trim() === '') return [];
-	const missing = DOC_RULE_MARKERS.filter(([, pattern]) => !pattern.test(text)).map(([label]) => label);
-	if (missing.length === 0) return [];
-	return [
-		`Spec mode: AGENTS.md 的规则块缺少文档相关规则：${missing.join('、')}。`
-			+ '这四条要跟着落盘文件传下去（自举）——改代码前同步过时文档、文档不写代码（术语可用、命令可有）、'
-			+ '首段白话导读、决策只记结论。见提示词「完成后的落盘顺序」的文档规则块。',
-	];
-}
-
-/**
  * Every advisory for one deliverable write, in a stable order: the AGENTS.md
  * line budget and its required rule block first (both change what the file does
- * as a baseline), then the three writing checks — code, the lead a layperson can
- * read, and the rejected alternative that must not be recorded.
+ * as a baseline), then the writing checks — code without a reproduction step,
+ * the lead a layperson can read, and the rejected alternative that must not be
+ * recorded.
  * @param {'agents' | 'doc'} kind - which deliverable this is.
  * @param {string} content - the exact content being written.
  * @returns {string[]} zero or more advisory messages.
@@ -436,7 +385,7 @@ export function deliverableAdvisories(kind, content) {
 	return [
 		...(kind === 'agents' ? agentsMdAdvisories(content) : []),
 		...(kind === 'agents' ? documentationRulesAdvisories(content) : []),
-		...codeFreeAdvisories(content),
+		...reproductionAdvisories(content),
 		...plainLanguageAdvisories(kind, content),
 		...decisionRationaleAdvisories(content),
 	];

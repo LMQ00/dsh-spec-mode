@@ -206,7 +206,7 @@ export function apply(ctx) {
 		commandCtx.commands.register({
 			definitionId: 'dsh-spec-mode',
 			name: COMMAND_NAME,
-			description: 'Spec mode: 访谈式需求固化 — 增量写草稿，工作树只读，退出后落盘 AGENTS.md 与技术文档（产出文档要外行看得懂：术语可用、命令可有、代码不出现）',
+			description: 'Spec mode: 访谈式需求固化 — 增量写草稿，工作树只读，退出后落盘 AGENTS.md 与技术文档（文档要外行看得懂：说人话优先，代码能不出就不出、要给就跟着复现步骤）',
 			input: { hint: '[off|初始想法]', attachments: true },
 			handler: ({ agent, rawInput, attachments }) => {
 				const session = agent.session;
@@ -287,7 +287,7 @@ export function apply(ctx) {
 					text:
 						'已退出 spec mode，工作树可写。现在按顺序落盘，不要跳步：\n'
 						+ '1. AGENTS.md（只放文档索引与可证伪的规则，并标注 enforcement；开头一句话说明这份文件是什么、给谁看；固定带上四条文档规则块——自举）\n'
-						+ '2. docs/*.md（只写实际存在的；术语可用、命令可有，但通篇不写代码，首段是外行读得懂的白话导读，决策只记结论、不写被否决方案与理由）\n'
+						+ '2. docs/*.md（只写实际存在的；说人话优先，代码能不出就不出、要给就跟着复现步骤，首段是外行读得懂的白话导读，讲流程要画真的图，决策只记结论、不写被否决方案与理由）\n'
 						+ `3. 删除草稿 ${value.draftPath}`,
 				},
 			],

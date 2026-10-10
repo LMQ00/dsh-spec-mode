@@ -15,11 +15,11 @@ import { join } from 'node:path';
 import {
 	agentsMdAdvisories,
 	agentsMdWriteContent,
-	codeFreeAdvisories,
 	decisionRationaleAdvisories,
 	deliverableAdvisories,
 	documentationRulesAdvisories,
 	plainLanguageAdvisories,
+	reproductionAdvisories,
 	specDeliverableWrite,
 } from './advisories.js';
 import { classifyTarget, extractTargetPaths, isDestructiveTool, isWriteTool } from './guard.js';
@@ -221,24 +221,22 @@ check('the plain-language lead warning fires only when the lead is missing', () 
 	assert.deepEqual(plainLanguageAdvisories('doc', '   '), []);
 });
 
-check('the code warning spares terms and commands', () => {
-	const hasCode = (text) => codeFreeAdvisories(text).length > 0;
-	assert.equal(hasCode('# 标题\n\n状态折叠那一步返回同一个对象，术语可以出现。\n'), false);
-	// A command is a run instruction, not code.
-	assert.equal(hasCode('# 标题\n\n复现：\n\n```\nnode selftest.mjs\n```\n'), false);
-	assert.equal(hasCode('# 标题\n\n复现：\n\n```\n$ npm run build\n```\n'), false);
-	assert.equal(hasCode('# 标题\n\n先在仓库根目录跑 node selftest.mjs，不带参数。\n'), false);
-	assert.equal(hasCode('# 标题\n\n```\n/spec off\n```\n'), false);
-	// Source text, identifiers and file names are not.
-	assert.equal(hasCode('# 标题\n\n```js\nconst a = 1;\n```\n'), true);
-	assert.equal(hasCode('# 标题\n\n改 state.js 的 apply() 之前先看这里。\n'), true);
-	assert.equal(hasCode('# 标题\n\n见 `apply()` 的实现。\n'), true);
-	assert.equal(hasCode('# 标题\n\n投影的状态版本号叫 PROJECTION_VERSION。\n'), true);
-	// A document's own path is an address, not code.
-	assert.equal(hasCode('# 标题\n\n文档索引：docs/api.md 什么时候读？\n'), false);
-	// A listing may cite a file name; citing one mid-sentence may not.
-	assert.equal(hasCode('| 文件 | 职责 |\n| --- | --- |\n| state.js | 恢复状态 |\n'), false);
-	assert.equal(hasCode('改 state.js 里的状态折叠逻辑。\n'), true);
+check('a code block is reported unless it is a step the reader performs', () => {
+	const reports = (text) => reproductionAdvisories(text).length > 0;
+	// Code as a step, with the three parts: where it goes, what to run, what success looks like.
+	const explained =
+		'# 标题\n\n把下面这段存成仓库根目录的检查脚本，然后执行 node check.mjs，'
+		+ '输出三行 ok 就是通过。\n\n```js\nconst a = 1;\n```\n';
+	assert.equal(reports(explained), false);
+	// A bare code block explains implementation instead of saying it in words.
+	assert.equal(reports('# 标题\n\n```js\nconst a = 1;\n```\n'), true);
+	assert.equal(reports('# 标题\n\n状态折叠那一步返回同一个对象。\n\n```ts\nexport function fold(state) { return state; }\n```\n'), true);
+	// A command block is already a step the reader performs.
+	assert.equal(reports('# 标题\n\n```\nnode selftest.mjs\n```\n'), false);
+	// So is a diagram, which carries its own reading note instead.
+	assert.equal(reports('# 标题\n\n```mermaid\nflowchart LR\n  A --> B\n```\n'), false);
+	assert.equal(reports('# 标题\n\n```\n┌───┐\n│ A │\n└───┘\n```\n'), false);
+	assert.deepEqual(reproductionAdvisories('   '), []);
 });
 
 check('the decision-rationale warning fires only on labelled rejections', () => {
@@ -256,11 +254,15 @@ check('the documentation rule block is required in AGENTS.md', () => {
 	assert.equal(documentationRulesAdvisories('| 文档 | 何时读 |\n').length, 1);
 	const complete =
 		'- 改代码前判断本次改动是否让 docs/ 过时。\n'
-		+ '- 文档不写代码，术语可以用、命令可以有。\n'
+		+ '- 代码能不出就不出，只在读者要照着做时给，并且每段代码都要跟着复现步骤：写进哪个文件、执行什么、看到什么算成功。\n'
 		+ '- 每份文档首段是外行读得懂的白话导读。\n'
+		+ '- 讲流程要画真的图，表格与列表不算图。\n'
 		+ '- 决策只记结论，不写被否决的方案与理由。\n';
 	assert.deepEqual(documentationRulesAdvisories(complete), []);
-	assert.equal(documentationRulesAdvisories('过时了就改，文档不写代码，首段要白话。\n').length, 1);
+	assert.equal(
+		documentationRulesAdvisories('过时了就改；代码要跟着复现步骤；首段要白话导读；讲流程要画图。\n').length,
+		1,
+	);
 	assert.deepEqual(documentationRulesAdvisories('   '), []);
 });
 
