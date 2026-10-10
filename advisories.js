@@ -9,8 +9,8 @@
  * budget exists here. The writing checks encode the landing protocol as a nudge
  * at write time: every deliverable opens with a plain-language lead a layperson
  * can read, code appears only as a step the reader performs (and then must say
- * which file, what to execute, and what success looks like — commands and
- * diagrams excepted), a decision is recorded as the decision alone, and
+ * which file, what to execute, and what success looks like — command and picture
+ * blocks excepted), a decision is recorded as the decision alone, and
  * `AGENTS.md` carries the rule block that keeps this standard alive inside the
  * repository.
  *
@@ -47,10 +47,10 @@ const COMMAND_WORDS = 'npm|pnpm|yarn|npx|node|deno|bun|git|python3?|pip3?|uv|car
 const COMMAND_START_RE = new RegExp(`^(?:sudo\\s+)?(?:\\.{1,2}[\\\\/])?(?:${COMMAND_WORDS})\\b`, 'i');
 
 /** Fence tags that mean the block draws a picture instead of showing code. */
-const DIAGRAM_INFOS = new Set(['mermaid', 'dot', 'graphviz', 'plantuml', 'puml', 'text', 'txt', 'ascii']);
+const PICTURE_INFOS = new Set(['mermaid', 'dot', 'graphviz', 'plantuml', 'puml', 'text', 'txt', 'ascii']);
 
-/** Arrows and box drawing: the block is a picture even without a diagram tag. */
-const DIAGRAM_MARK_RE = /(?:-->|==>|→|⇢|←|─|│|┌|└|├|┐|┘|╰|╯)/;
+/** Arrows and box drawing: the block is a picture even without a picture tag. */
+const PICTURE_MARK_RE = /(?:-->|==>|→|⇢|←|─|│|┌|└|├|┐|┘|╰|╯)/;
 
 /**
  * Wording that tells a reader how to make a block run: where it goes, what to
@@ -71,7 +71,6 @@ const DOC_RULE_MARKERS = [
 	['改代码前同步过时文档', /过时/],
 	['代码只在要人照做时出现，且跟着复现步骤', /复现/],
 	['首段白话导读', /(导读|白话|外行)/],
-	['讲流程要画真的图', /图/],
 	['决策只记结论', /(决策只记结论|只记结论)/],
 ];
 
@@ -164,14 +163,15 @@ function isCommandBlock(block) {
 }
 
 /**
- * Whether a block draws a picture: tagged as a diagram format, or built from
- * arrows and box drawing.
+ * Whether a block draws a picture: tagged as a picture format, or built from
+ * arrows and box drawing. A picture is not code, so it needs no reproduction
+ * step — this only keeps the check from misreporting one.
  * @param {{ info: string, lines: string[] }} block - one fenced block.
- * @returns {boolean} true for a diagram block.
+ * @returns {boolean} true for a picture block.
  */
-function isDiagramBlock(block) {
-	if (DIAGRAM_INFOS.has(block.info)) return true;
-	return DIAGRAM_MARK_RE.test(block.lines.join('\n'));
+function isPictureBlock(block) {
+	if (PICTURE_INFOS.has(block.info)) return true;
+	return PICTURE_MARK_RE.test(block.lines.join('\n'));
 }
 
 /**
@@ -255,7 +255,7 @@ export function documentationRulesAdvisories(content) {
 	return [
 		`Spec mode: AGENTS.md 的规则块缺少文档相关规则：${missing.join('、')}。`
 			+ '这几条要跟着落盘文件传下去（自举）——改代码前同步过时文档、代码跟着复现步骤、'
-			+ '首段白话导读、讲流程要画真的图、决策只记结论。见提示词「完成后的落盘顺序」的文档规则块。',
+			+ '首段白话导读、决策只记结论。见提示词「完成后的落盘顺序」的文档规则块。',
 	];
 }
 
@@ -320,8 +320,8 @@ export function plainLanguageAdvisories(kind, content) {
 
 /**
  * Advisory messages for a code block that does not say how to make it run. A
- * command block already is a reproduction step, and a diagram carries its own
- * reading note, so neither is reported.
+ * command block already is a reproduction step, and a picture block is not code,
+ * so neither is reported.
  * @param {string} content - the exact content being written.
  * @returns {string[]} zero or more advisory messages.
  */
@@ -330,7 +330,7 @@ export function reproductionAdvisories(content) {
 	if (text.trim() === '') return [];
 	const lines = text.split('\n');
 	for (const block of fencedBlocks(text)) {
-		if (isCommandBlock(block) || isDiagramBlock(block)) continue;
+		if (isCommandBlock(block) || isPictureBlock(block)) continue;
 		const body = blockBody(block);
 		if (body.length === 0) continue;
 		const around = [
@@ -342,7 +342,7 @@ export function reproductionAdvisories(content) {
 			`Spec mode: 这段代码旁边没有复现步骤：「${excerptOf(body[0])}」。`
 				+ '代码能不出就不出——要靠贴代码讲实现，说明这段逻辑还没讲清；真要给读者照做的步骤，'
 				+ '就补上三件事：写进哪个文件（或直接在哪执行）、执行什么、看到什么算成功。'
-				+ '命令行与流程图不必（命令行本身就是步骤，图要另配白话读图说明）。'
+				+ '命令行块与图形块不必（命令行本身就是步骤，图形不是代码）。'
 				+ '见提示词「产出文档的写法：说人话」。',
 		];
 	}

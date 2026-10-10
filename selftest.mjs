@@ -233,7 +233,7 @@ check('a code block is reported unless it is a step the reader performs', () => 
 	assert.equal(reports('# 标题\n\n状态折叠那一步返回同一个对象。\n\n```ts\nexport function fold(state) { return state; }\n```\n'), true);
 	// A command block is already a step the reader performs.
 	assert.equal(reports('# 标题\n\n```\nnode selftest.mjs\n```\n'), false);
-	// So is a diagram, which carries its own reading note instead.
+	// So is a picture block: a picture is not code, so nothing is required of it.
 	assert.equal(reports('# 标题\n\n```mermaid\nflowchart LR\n  A --> B\n```\n'), false);
 	assert.equal(reports('# 标题\n\n```\n┌───┐\n│ A │\n└───┘\n```\n'), false);
 	assert.deepEqual(reproductionAdvisories('   '), []);
@@ -256,7 +256,6 @@ check('the documentation rule block is required in AGENTS.md', () => {
 		'- 改代码前判断本次改动是否让 docs/ 过时。\n'
 		+ '- 代码能不出就不出，只在读者要照着做时给，并且每段代码都要跟着复现步骤：写进哪个文件、执行什么、看到什么算成功。\n'
 		+ '- 每份文档首段是外行读得懂的白话导读。\n'
-		+ '- 讲流程要画真的图，表格与列表不算图。\n'
 		+ '- 决策只记结论，不写被否决的方案与理由。\n';
 	assert.deepEqual(documentationRulesAdvisories(complete), []);
 	assert.equal(
