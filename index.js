@@ -19,7 +19,7 @@
 
 import { randomUUID } from 'node:crypto';
 
-import { agentsMdAdvisories, agentsMdWriteContent } from './advisories.js';
+import { agentsMdAdvisories, deliverableAdvisories, specDeliverableWrite } from './advisories.js';
 import { classifyTarget, extractTargetPaths, isDestructiveTool, isWriteTool } from './guard.js';
 import { pendingDraftNotice, specModeContext } from './prompt.js';
 import {
@@ -166,6 +166,18 @@ export function apply(ctx) {
 		return resolveDraftPath(sessionCwd(session));
 	}
 
+	/**
+	 * Whether a spec-mode landing is plausible for one session: the mode is on,
+	 * this process just approved the exit, or an interview draft is still on disk
+	 * (a landing that follows a manual `/spec off`). The readability advisories
+	 * are landing-protocol judgements, so they stay quiet outside such work —
+	 * merely having the plugin installed must not lecture unrelated doc writes.
+	 */
+	function landingInProgress(session) {
+		if (isSpecActive(session) || liveExits.has(session)) return true;
+		return draftHasContent(draftPathFor(session));
+	}
+
 	/* ---------------- durable state ---------------- */
 
 	ctx.sessionProjections.register(createSpecProjection(COMMAND_NAME, EXIT_TOOL_NAME));
@@ -194,7 +206,7 @@ export function apply(ctx) {
 		commandCtx.commands.register({
 			definitionId: 'dsh-spec-mode',
 			name: COMMAND_NAME,
-			description: 'Spec mode: 访谈式需求固化 — 增量写草稿，工作树只读，退出后落盘 AGENTS.md 与技术文档',
+			description: 'Spec mode: 访谈式需求固化 — 增量写草稿，工作树只读，退出后落盘 AGENTS.md 与技术文档（产出文档要外行看得懂：术语可用、命令可有、代码不出现）',
 			input: { hint: '[off|初始想法]', attachments: true },
 			handler: ({ agent, rawInput, attachments }) => {
 				const session = agent.session;
@@ -274,8 +286,8 @@ export function apply(ctx) {
 					type: 'text',
 					text:
 						'已退出 spec mode，工作树可写。现在按顺序落盘，不要跳步：\n'
-						+ '1. AGENTS.md（只放文档索引与可证伪的规则，并标注 enforcement）\n'
-						+ '2. docs/*.md（只写实际存在的）\n'
+						+ '1. AGENTS.md（只放文档索引与可证伪的规则，并标注 enforcement；开头一句话说明这份文件是什么、给谁看；固定带上四条文档规则块——自举）\n'
+						+ '2. docs/*.md（只写实际存在的；术语可用、命令可有，但通篇不写代码，首段是外行读得懂的白话导读，决策只记结论、不写被否决方案与理由）\n'
 						+ `3. 删除草稿 ${value.draftPath}`,
 				},
 			],
@@ -372,16 +384,31 @@ export function apply(ctx) {
 		return undefined;
 	});
 
-	/* ---------------- AGENTS.md advisories ---------------- */
+	/* ---------------- deliverable advisories ---------------- */
 
 	ctx.on('tools/post-execute', async (exec, result, next) => {
 		const decision = await next();
 		try {
-			const content = agentsMdWriteContent(exec.name, exec.arguments, result.isError === true);
-			if (content === undefined || decision.kind !== 'accept') return decision;
-			const messages = agentsMdAdvisories(content);
+			const write = specDeliverableWrite(exec.name, exec.arguments, result.isError === true);
+			if (write === undefined || decision.kind !== 'accept') return decision;
+			const session = exec.agent?.session;
+			let landing = false;
+			if (session !== undefined) {
+				const cwd = sessionCwd(session);
+				// The interview draft is a `docs/*.md` file but never a deliverable:
+				// it is written every turn and deleted at landing time.
+				const isDraft = classifyTarget(write.path, cwd, resolveDraftPath(cwd)) === 'draft';
+				landing = !isDraft && landingInProgress(session);
+			}
+			// The line budget constrains a file the host reads as a session baseline,
+			// so it reports regardless of mode; the two readability checks belong to
+			// the landing protocol and report only while a landing is plausible.
+			const messages = landing
+				? deliverableAdvisories(write.kind, write.content)
+				: (write.kind === 'agents' ? agentsMdAdvisories(write.content) : []);
 			if (messages.length === 0) return decision;
-			const contexts = messages.map((text) => noticeMessage(text, 'Spec mode: AGENTS.md 检查'));
+			const summary = write.kind === 'agents' ? 'Spec mode: AGENTS.md 检查' : `Spec mode: 文档检查 ${write.base}`;
+			const contexts = messages.map((text) => noticeMessage(text, summary));
 			return { ...decision, additionalContexts: [...(decision.additionalContexts ?? []), ...contexts] };
 		} catch {
 			return decision;

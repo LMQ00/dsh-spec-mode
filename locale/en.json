@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Spec Mode",
-    "description": "Interview-driven requirements capture: incremental draft writing, a read-only working tree, and a reviewed exit that lands AGENTS.md plus docs/."
+    "description": "Interview-driven requirements capture: incremental draft writing, a read-only working tree, and a reviewed exit that lands AGENTS.md plus docs/. Deliverables are written for readers who know neither the code nor the domain: terms and commands are welcome, code is not."
   }
 }
