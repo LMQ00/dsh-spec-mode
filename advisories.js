@@ -7,11 +7,12 @@
  * baseline when the deployment composes it, so an over-long rule file is
  * truncated or dropped rather than merely verbose — the same reason the line
  * budget exists here. The writing checks encode the landing protocol as a nudge
- * at write time: a rule file records rules and nothing else, code appears only
- * as a step the reader performs (and then must say which file, what to execute,
- * and what success looks like — command and picture blocks excepted), a decision
- * is recorded as the decision alone, and `AGENTS.md` carries the rule block that
- * keeps this standard alive inside the repository.
+ * at write time: a rule file records rules and nothing else, a document records
+ * conclusions and hard facts rather than the reasoning behind them, code appears
+ * only as a step the reader performs (and then must say which file, what to
+ * execute, and what success looks like — command and picture blocks excepted),
+ * and `AGENTS.md` carries the rule block that keeps this standard alive inside
+ * the repository.
  *
  * Whether a document is written so a layperson can follow it is a judgement of
  * the whole text, not of its opening paragraph, so no check tries to approximate
@@ -62,10 +63,9 @@ const CUE_LINES_AFTER = 6;
 const DOC_RULE_MARKERS = [
 	['改代码前同步过时文档', /过时/],
 	['规则文件只放索引与规范，不写进度', /(进度|待办|下一步|现状)/],
+	['文档只写结论、不解释', /(?:(?:只写|不写)[^\n]{0,20}(?:结论|硬事实|解释))|(?:(?:结论|硬事实|解释)[^\n]{0,20}(?:只写|不写))/],
+	['文档信息密度极高', /(信息密度|一行一个结论|能进表格就进表格)/],
 	['代码只在要人照做时出现，且跟着复现步骤', /复现/],
-	// The scope word must sit next to the plain-language word: "the lead is a
-	// plain-language summary" is the requirement this replaced, not this one.
-	['文档整篇说人话', /(?:(?:整篇|全篇|通篇|全文|全文档|每一?节|每一?段)[^\n]{0,24}(?:说人话|人话|白话|外行))|(?:(?:说人话|人话|白话|外行)[^\n]{0,24}(?:整篇|全篇|通篇|全文|全文档))/],
 	['决策只记结论', /(决策只记结论|只记结论)/],
 ];
 
@@ -95,6 +95,49 @@ const REJECTION_RE = /(为什么不|为何不|不选它|不采用|被否决|否�
  * statement itself. Such a line is about the practice, not an instance of it.
  */
 const PROHIBITION_RE = /(不写|不记|不要写|别写|禁止写|不需要写|避免写|不记录)/;
+
+/**
+ * Section headings that carry no fact a reader can use. A document states
+ * conclusions; motivation, background and reasoning are the explanation it must
+ * not contain, a glossary defines what the text should say in passing, and a
+ * lead or a summary restates what the rest already says.
+ */
+const FILLER_HEADING_RE = /(?:导读|引言|前言|背景|动机|初衷|由来|缘起|历史|沿革|为什么|设计考量|设计思路|设计权衡|权衡|取舍|术语表|术语解释|名词解释|本章小结|小结|总结|综上|后记|结语)/;
+
+/** Heads that introduce a block whose text is the reader's reference. */
+const HEADING_RE = /^\s*#{1,6}\s+\S/;
+
+/** A line that opens with a bold label, the other way a block gets a title. */
+const BOLD_LABEL_RE = /^\s*\*\*\S/;
+
+/** Longest a labelled line may run before it reads as prose rather than a title. */
+const TITLE_MAX_CHARS = 40;
+
+/**
+ * Whether a structural line reads as a title rather than as prose carrying a
+ * word. Only headings and short bold labels are titles: a bullet is normally a
+ * statement, and reporting one would flag the very rule that forbids the
+ * practice.
+ * @param {string} line - the trimmed line.
+ * @returns {boolean} true when the line introduces a block.
+ */
+function isBlockTitle(line) {
+	if (HEADING_RE.test(line)) return true;
+	return BOLD_LABEL_RE.test(line) && line.length <= TITLE_MAX_CHARS;
+}
+
+/**
+ * The label of one structural line, stripped of its marker and any emphasis.
+ * @param {string} line - the trimmed line.
+ * @returns {string} the label, for quoting in a message.
+ */
+function titleLabel(line) {
+	return line
+		.replace(/^#{1,6}\s+/, '')
+		.replace(/^\*\*/, '')
+		.replace(/\*\*$/, '')
+		.trim();
+}
 
 /** Longest quoted excerpt of an offending line, in characters. */
 const EXCERPT_MAX_CHARS = 40;
@@ -264,7 +307,8 @@ export function documentationRulesAdvisories(content) {
 	return [
 		`Spec mode: AGENTS.md 的规则块缺少文档相关规则：${missing.join('、')}。`
 			+ '这几条要跟着落盘文件传下去（自举）——改代码前同步过时文档、规则文件只放索引与规范不写进度、'
-			+ '代码跟着复现步骤、文档整篇说人话、决策只记结论。见提示词「完成后的落盘顺序」的文档规则块。',
+			+ '文档只写结论不解释、信息密度极高、代码跟着复现步骤、决策只记结论。'
+			+ '见提示词「完成后的落盘顺序」的文档规则块。',
 	];
 }
 
@@ -320,7 +364,7 @@ export function reproductionAdvisories(content) {
 				+ '代码能不出就不出——要靠贴代码讲实现，说明这段逻辑还没讲清；真要给读者照做的步骤，'
 				+ '就补上三件事：写进哪个文件（或直接在哪执行）、执行什么、看到什么算成功。'
 				+ '命令行块与图形块不必（命令行本身就是步骤，图形不是代码）。'
-				+ '见提示词「产出文档的写法：说人话」。',
+				+ '见提示词「产出文档的写法：只写结论，写干货」。',
 		];
 	}
 	return [];
@@ -349,11 +393,40 @@ export function decisionRationaleAdvisories(content) {
 }
 
 /**
+ * Advisory messages for a deliverable that explains itself: a section reserved
+ * for motivation, background, design reasoning or a summary. A document states
+ * conclusions and hard facts; the reasoning behind them is not the reader's
+ * business, and a lead or a summary only restates what the rest already says.
+ * Prose that happens to use one of these words is not reported — the check reads
+ * block titles only, the same way the progress and rejection checks do.
+ * @param {string} content - the exact content being written.
+ * @returns {string[]} zero or more advisory messages.
+ */
+export function reasonAdvisories(content) {
+	const text = typeof content === 'string' ? content : '';
+	for (const raw of text.split('\n')) {
+		const line = raw.trim();
+		if (line === '' || !isBlockTitle(line)) continue;
+		const label = titleLabel(line);
+		if (!FILLER_HEADING_RE.test(label)) continue;
+		// The rule that forbids such a section is not one.
+		if (PROHIBITION_RE.test(label)) continue;
+		return [
+			`Spec mode: 文档里出现了不写事实的小节：「${excerptOf(label)}」。`
+				+ '文档只写结论与硬事实——写了什么、怎么用、什么条件下不成立、下一步做什么；'
+				+ '动机、背景、设计考量、小结这类小节删掉，开场不铺引言，结尾不做总结，'
+				+ '纯事实的清单（命令、文件、参数）除外。见提示词「产出文档的写法：只写结论，写干货」。',
+		];
+	}
+	return [];
+}
+
+/**
  * Every advisory for one deliverable write, in a stable order: the AGENTS.md
  * line budget, its required rule block, and its ban on progress content first
  * (all three change what the file does as a baseline), then the writing checks —
- * code without a reproduction step, and the rejected alternative that must not
- * be recorded.
+ * code without a reproduction step, the self-explaining section that must not be
+ * written, and the rejected alternative that must not be recorded.
  * @param {'agents' | 'doc'} kind - which deliverable this is.
  * @param {string} content - the exact content being written.
  * @returns {string[]} zero or more advisory messages.
@@ -364,6 +437,7 @@ export function deliverableAdvisories(kind, content) {
 		...(kind === 'agents' ? documentationRulesAdvisories(content) : []),
 		...(kind === 'agents' ? progressAdvisories(content) : []),
 		...reproductionAdvisories(content),
+		...reasonAdvisories(content),
 		...decisionRationaleAdvisories(content),
 	];
 }

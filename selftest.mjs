@@ -19,6 +19,7 @@ import {
 	deliverableAdvisories,
 	documentationRulesAdvisories,
 	progressAdvisories,
+	reasonAdvisories,
 	reproductionAdvisories,
 	specDeliverableWrite,
 } from './advisories.js';
@@ -255,28 +256,48 @@ check('the documentation rule block is required in AGENTS.md', () => {
 	const complete =
 		'- 改代码前判断本次改动是否让 docs/ 过时。\n'
 		+ '- AGENTS.md 只放文档索引与规范规则，不写现状、进度、待办这类内容。\n'
+		+ '- 写进 docs/ 的文档只写结论与硬事实，不解释：删掉一句话读者照做也不出错，就删。\n'
+		+ '- 文档信息密度极高：一行一个结论，能进表格就进表格。\n'
 		+ '- 代码能不出就不出，只在读者要照着做时给，并且每段代码都要跟着复现步骤：写进哪个文件、执行什么、看到什么算成功。\n'
-		+ '- 文档整篇说人话，不靠开头一段白话交差。\n'
 		+ '- 决策只记结论，不写被否决的方案与理由。\n';
 	assert.deepEqual(documentationRulesAdvisories(complete), []);
 	assert.equal(
-		documentationRulesAdvisories('过时了就改；代码要跟着复现步骤；整篇说人话；决策只记结论。\n').length,
-		1,
+		documentationRulesAdvisories('过时了就改；规则文件不写进度；只写结论不解释；信息密度极高；代码要跟着复现步骤；决策只记结论。\n').length,
+		0,
 	);
-	// The old wording — a plain-language lead — must not satisfy the new rule.
+	// The wording this standard replaced — a plain-language document — no longer
+	// satisfies the rule block.
 	assert.equal(
-		documentationRulesAdvisories('过时了就改；代码跟着复现步骤不写进度；每份文档首段是白话导读；决策只记结论。\n').length,
+		documentationRulesAdvisories('过时了就改；代码跟着复现步骤不写进度；文档整篇说人话；决策只记结论。\n').length,
 		1,
 	);
 	assert.deepEqual(documentationRulesAdvisories('   '), []);
+});
+
+check('a section that exists to explain itself is reported', () => {
+	const reports = (text) => reasonAdvisories(text).length > 0;
+	assert.equal(reports('# 标题\n\n## 已知限制\n\n- 用 shell 写文件不拦。\n'), false);
+	// The rule that forbids the section is not the section.
+	assert.equal(reports('# 规则\n\n- 文档不写背景、动机与设计考量。\n'), false);
+	assert.equal(reports('# 规则\n\n**不写导读与小结。**\n'), false);
+	assert.equal(reports('## 背景\n\n为什么会有这个插件。\n'), true);
+	assert.equal(reports('# 标题\n\n## 本章小结\n\n正文。\n'), true);
+	assert.equal(reports('### 设计考量\n\n正文。\n'), true);
+	assert.equal(reports('**取舍**\n\n正文。\n'), true);
+	// Prose that merely uses one of the words is not a section.
+	assert.equal(reports('# 标题\n\n这里记录了当时的权衡结果，不改。\n'), false);
+	assert.deepEqual(reasonAdvisories('   '), []);
 });
 
 check('one deliverable collects the line budget and every writing check', () => {
 	const long = Array.from({ length: 201 }, () => 'x').join('\n');
 	assert.equal(deliverableAdvisories('agents', long).length, 2);
 	assert.deepEqual(deliverableAdvisories('doc', long), []);
-	assert.equal(deliverableAdvisories('doc', '## 为什么不选 X\n\n正文。\n').length, 1);
+	// A section named after the rejected alternative trips both the "why" heading
+	// check and the decision-rationale check.
+	assert.equal(deliverableAdvisories('doc', '## 为什么不选 X\n\n正文。\n').length, 2);
 	assert.equal(deliverableAdvisories('doc', '# 标题\n\n```js\nconst a = 1;\n```\n').length, 1);
+	assert.equal(deliverableAdvisories('doc', '## 背景\n\n正文。\n').length, 1);
 	// A baseline carrying progress reports both the missing rule block and the
 	// progress record itself.
 	const withProgress = '## 现状\n\n- 已能启动。\n';

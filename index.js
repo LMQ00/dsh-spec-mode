@@ -206,7 +206,7 @@ export function apply(ctx) {
 		commandCtx.commands.register({
 			definitionId: 'dsh-spec-mode',
 			name: COMMAND_NAME,
-			description: 'Spec mode: 访谈式需求固化 — 增量写草稿，工作树只读，退出后落盘 AGENTS.md 与技术文档（文档要外行看得懂：说人话优先，代码能不出就不出、要给就跟着复现步骤）',
+			description: 'Spec mode: 访谈式需求固化 — 增量写草稿，工作树只读，退出后落盘 AGENTS.md 与技术文档（文档只写结论与干货、不解释，外行能看懂且信息密度极高；代码能不出就不出、要给就跟着复现步骤）',
 			input: { hint: '[off|初始想法]', attachments: true },
 			handler: ({ agent, rawInput, attachments }) => {
 				const session = agent.session;
@@ -286,8 +286,8 @@ export function apply(ctx) {
 					type: 'text',
 					text:
 						'已退出 spec mode，工作树可写。现在按顺序落盘，不要跳步：\n'
-						+ '1. AGENTS.md（只放文档索引与可证伪的规则，并标注 enforcement；不写开头介绍句，不写现状、进度、待办、里程碑这类内容；固定带上五条文档规则块——自举）\n'
-						+ '2. docs/*.md（只写实际存在的；整篇说人话——代码能不出就不出、要给就跟着复现步骤，决策只记结论、不写被否决方案与理由）\n'
+						+ '1. AGENTS.md（只放文档索引与可证伪的规则，并标注 enforcement；不写开头介绍句，不写现状、进度、待办、里程碑这类内容；固定带上六条文档规则块——自举）\n'
+						+ '2. docs/*.md（只写实际存在的；只写结论与硬事实、不解释，信息密度极高——一行一个结论、能进表格就进表格、术语不解释；代码能不出就不出、要给就跟着复现步骤；决策只记结论、不写被否决方案与理由）\n'
 						+ `3. 删除草稿 ${value.draftPath}`,
 				},
 			],
