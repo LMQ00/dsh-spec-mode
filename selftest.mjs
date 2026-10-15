@@ -18,7 +18,7 @@ import {
 	decisionRationaleAdvisories,
 	deliverableAdvisories,
 	documentationRulesAdvisories,
-	plainLanguageAdvisories,
+	progressAdvisories,
 	reproductionAdvisories,
 	specDeliverableWrite,
 } from './advisories.js';
@@ -203,22 +203,22 @@ check('a deliverable write is classified by its target', () => {
 	assert.equal(specDeliverableWrite('write', { file_path: 'docs/api.md', content: 'x' }, true), undefined);
 });
 
-check('the plain-language lead warning fires only when the lead is missing', () => {
-	const readable =
-		'# 标题\n\n'
-		+ '这份文档回答一个问题：插件在什么时候拦下写入。读完你就知道哪些操作会被挡住，以及被挡住时该怎么办。\n\n'
-		+ '## 细节\n\n正文。\n';
-	assert.deepEqual(plainLanguageAdvisories('doc', readable), []);
-	assert.equal(plainLanguageAdvisories('doc', '# 标题\n\n## 细节\n\n正文。\n').length, 1);
-	assert.equal(plainLanguageAdvisories('doc', '# 标题\n\n```js\nconst a = 1;\n```\n\n## 细节\n').length, 1);
-	assert.equal(plainLanguageAdvisories('doc', '# 标题\n\n| 文档 | 何时读 |\n| --- | --- |\n').length, 1);
-	assert.equal(plainLanguageAdvisories('doc', '# 标题\n\n- 一份说明。\n').length, 1);
-	assert.equal(plainLanguageAdvisories('agents', '# AGENTS.md\n\n| 文档 | 何时读 |\n| --- | --- |\n').length, 1);
-	assert.equal(
-		plainLanguageAdvisories('doc', '# 标题\n\n想弄清写入是怎么被拦下的，先读 docs/api.md 那份文档，它比这里细。\n').length,
-		1,
-	);
-	assert.deepEqual(plainLanguageAdvisories('doc', '   '), []);
+check('progress content is reported only on labelled structural lines', () => {
+	const reports = (text) => progressAdvisories(text).length > 0;
+	assert.equal(reports('# 规则\n\n- 临时文件放 tmp/。\n'), false);
+	assert.equal(reports('## 现状\n\n已装入 profile。\n'), true);
+	assert.equal(reports('- 待办：补测试。\n'), true);
+	assert.equal(reports('**下一步**：升级宿主。\n'), true);
+	assert.equal(reports('## 里程碑\n'), true);
+	assert.equal(reports('## 变更记录\n'), true);
+	// Prose that merely uses a status word is not a progress section.
+	assert.equal(reports('折叠对无关事件必须返回同一个引用，否则投影的增量机制失效。\n'), false);
+	// The rule that forbids progress content is not progress content.
+	assert.equal(reports('- AGENTS.md 只放文档索引与规范规则，不写进度类内容。\n'), false);
+	assert.equal(reports('- 落盘的规范文件里不写现状、待办与里程碑。\n'), false);
+	// A docs/ deliverable may record status; only the baseline may not.
+	assert.deepEqual(deliverableAdvisories('doc', '## 现状\n\n已装入。\n'), []);
+	assert.deepEqual(progressAdvisories('   '), []);
 });
 
 check('a code block is reported unless it is a step the reader performs', () => {
@@ -254,12 +254,18 @@ check('the documentation rule block is required in AGENTS.md', () => {
 	assert.equal(documentationRulesAdvisories('| 文档 | 何时读 |\n').length, 1);
 	const complete =
 		'- 改代码前判断本次改动是否让 docs/ 过时。\n'
+		+ '- AGENTS.md 只放文档索引与规范规则，不写现状、进度、待办这类内容。\n'
 		+ '- 代码能不出就不出，只在读者要照着做时给，并且每段代码都要跟着复现步骤：写进哪个文件、执行什么、看到什么算成功。\n'
-		+ '- 每份文档首段是外行读得懂的白话导读。\n'
+		+ '- 文档整篇说人话，不靠开头一段白话交差。\n'
 		+ '- 决策只记结论，不写被否决的方案与理由。\n';
 	assert.deepEqual(documentationRulesAdvisories(complete), []);
 	assert.equal(
-		documentationRulesAdvisories('过时了就改；代码要跟着复现步骤；首段要白话导读；讲流程要画图。\n').length,
+		documentationRulesAdvisories('过时了就改；代码要跟着复现步骤；整篇说人话；决策只记结论。\n').length,
+		1,
+	);
+	// The old wording — a plain-language lead — must not satisfy the new rule.
+	assert.equal(
+		documentationRulesAdvisories('过时了就改；代码跟着复现步骤不写进度；每份文档首段是白话导读；决策只记结论。\n').length,
 		1,
 	);
 	assert.deepEqual(documentationRulesAdvisories('   '), []);
@@ -269,8 +275,12 @@ check('one deliverable collects the line budget and every writing check', () => 
 	const long = Array.from({ length: 201 }, () => 'x').join('\n');
 	assert.equal(deliverableAdvisories('agents', long).length, 2);
 	assert.deepEqual(deliverableAdvisories('doc', long), []);
-	assert.equal(deliverableAdvisories('doc', '## 为什么不选 X\n\n正文。\n').length, 2);
-	assert.equal(deliverableAdvisories('doc', '# 标题\n\n```js\nconst a = 1;\n```\n').length, 2);
+	assert.equal(deliverableAdvisories('doc', '## 为什么不选 X\n\n正文。\n').length, 1);
+	assert.equal(deliverableAdvisories('doc', '# 标题\n\n```js\nconst a = 1;\n```\n').length, 1);
+	// A baseline carrying progress reports both the missing rule block and the
+	// progress record itself.
+	const withProgress = '## 现状\n\n- 已能启动。\n';
+	assert.equal(deliverableAdvisories('agents', withProgress).length, 2);
 });
 
 console.log(`\n${passed} checks passed`);

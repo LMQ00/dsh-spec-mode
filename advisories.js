@@ -7,30 +7,22 @@
  * baseline when the deployment composes it, so an over-long rule file is
  * truncated or dropped rather than merely verbose — the same reason the line
  * budget exists here. The writing checks encode the landing protocol as a nudge
- * at write time: every deliverable opens with a plain-language lead a layperson
- * can read, code appears only as a step the reader performs (and then must say
- * which file, what to execute, and what success looks like — command and picture
- * blocks excepted), a decision is recorded as the decision alone, and
- * `AGENTS.md` carries the rule block that keeps this standard alive inside the
- * repository.
+ * at write time: a rule file records rules and nothing else, code appears only
+ * as a step the reader performs (and then must say which file, what to execute,
+ * and what success looks like — command and picture blocks excepted), a decision
+ * is recorded as the decision alone, and `AGENTS.md` carries the rule block that
+ * keeps this standard alive inside the repository.
+ *
+ * Whether a document is written so a layperson can follow it is a judgement of
+ * the whole text, not of its opening paragraph, so no check tries to approximate
+ * it: a "plain lead" check only ever rewarded a single opening sentence while
+ * the rest of the document stayed unreadable.
  *
  * @module dsh-spec-mode/advisories
  */
 
 /** Line budget above which AGENTS.md adherence measurably degrades. */
 export const AGENTS_MD_LINE_LIMIT = 200;
-
-/** Shortest lead paragraph still able to carry a plain-language summary. */
-export const PLAIN_LEAD_MIN_CHARS = 24;
-
-/** Inline code in the lead means the lead was not written for a layperson. */
-const CODE_MARK_RE = /`/;
-
-/** A path-ish token: `docs/api.md`, `./x`, `C:\x`, `https://x`. */
-const PATH_TOKEN_RE = /(?:[A-Za-z]:[\\/]|(?:^|[^\w-])[\w.-]*[\\/][\w.-]+)/;
-
-/** Line shapes that never carry the prose of a lead paragraph. */
-const NON_PROSE_LINE_RE = /^\s*(?:#{1,6}\s|```|\||>|[-*+]\s|\d+[.)]\s)/;
 
 /** Line shapes that introduce a labelled block, where a decision would be recorded. */
 const STRUCTURAL_LINE_RE = /^\s*(?:#{1,6}\s|\*\*|[-*+]\s|\d+[.)]\s)/;
@@ -69,10 +61,27 @@ const CUE_LINES_AFTER = 6;
  */
 const DOC_RULE_MARKERS = [
 	['改代码前同步过时文档', /过时/],
+	['规则文件只放索引与规范，不写进度', /(进度|待办|下一步|现状)/],
 	['代码只在要人照做时出现，且跟着复现步骤', /复现/],
-	['首段白话导读', /(导读|白话|外行)/],
+	// The scope word must sit next to the plain-language word: "the lead is a
+	// plain-language summary" is the requirement this replaced, not this one.
+	['文档整篇说人话', /(?:(?:整篇|全篇|通篇|全文|全文档|每一?节|每一?段)[^\n]{0,24}(?:说人话|人话|白话|外行))|(?:(?:说人话|人话|白话|外行)[^\n]{0,24}(?:整篇|全篇|通篇|全文|全文档))/],
 	['决策只记结论', /(决策只记结论|只记结论)/],
 ];
+
+/**
+ * Wording that marks a progress record rather than a rule. Matched on
+ * structural lines only, so prose that happens to use one of these words does
+ * not fire. `AGENTS.md` is read into every session's context as a baseline, so
+ * a status section both crowds out the rules and goes stale unowned.
+ */
+const PROGRESS_RE = /(进度|待办|待办事项|下一步|接下来的|未完成|已完成|待完成|进度表|里程碑|roadmap|TODO|TBD|changelog|更新日志|变更记录|当前状态|现状)/i;
+
+/**
+ * A line that forbids progress content rather than being an instance of it —
+ * the rule statement itself.
+ */
+const PROGRESS_PROHIBITION_RE = /(不写|不记|不要写|别写|禁止写|不需要写|避免写|不记录|不属于|不放|不含|不收|不留|只放)/;
 
 /**
  * Wording that means a decision was written down together with the alternative
@@ -254,68 +263,36 @@ export function documentationRulesAdvisories(content) {
 	if (missing.length === 0) return [];
 	return [
 		`Spec mode: AGENTS.md 的规则块缺少文档相关规则：${missing.join('、')}。`
-			+ '这几条要跟着落盘文件传下去（自举）——改代码前同步过时文档、代码跟着复现步骤、'
-			+ '首段白话导读、决策只记结论。见提示词「完成后的落盘顺序」的文档规则块。',
+			+ '这几条要跟着落盘文件传下去（自举）——改代码前同步过时文档、规则文件只放索引与规范不写进度、'
+			+ '代码跟着复现步骤、文档整篇说人话、决策只记结论。见提示词「完成后的落盘顺序」的文档规则块。',
 	];
 }
 
 /**
- * The document's opening region: every line before its first level-2 heading,
- * with fenced code excluded.
- * @param {string} text - the written content.
- * @returns {string} the lead region.
- */
-function leadRegion(text) {
-	const kept = [];
-	let inFence = false;
-	for (const line of text.split('\n')) {
-		if (/^\s*```/.test(line)) {
-			inFence = !inFence;
-			continue;
-		}
-		if (!inFence && /^#{2,}\s/.test(line)) break;
-		if (!inFence) kept.push(line);
-	}
-	return kept.join('\n');
-}
-
-/**
- * Whether the lead carries a paragraph a layperson can read: prose long enough
- * to say something, with no inline code and no path.
- * @param {string} text - the written content.
- * @returns {boolean} true when such a paragraph exists.
- */
-function hasPlainLead(text) {
-	for (const block of leadRegion(text).split(/\n\s*\n/)) {
-		const paragraph = block
-			.split('\n')
-			.filter((line) => !NON_PROSE_LINE_RE.test(line))
-			.join('\n')
-			.trim();
-		if (paragraph.length < PLAIN_LEAD_MIN_CHARS) continue;
-		if (CODE_MARK_RE.test(paragraph)) continue;
-		if (PATH_TOKEN_RE.test(paragraph)) continue;
-		return true;
-	}
-	return false;
-}
-
-/**
- * Advisory messages for a deliverable that does not open with a plain-language
- * lead.
- * @param {'agents' | 'doc'} kind - which deliverable this is.
+ * Advisory message for an `AGENTS.md` that records progress. Progress belongs
+ * to the commit history and the conversation; the rule file is read into every
+ * session's context, so a status section crowds out the rules and then goes
+ * stale with nobody responsible for removing it.
  * @param {string} content - the exact content being written.
- * @returns {string[]} zero or more advisory messages.
+ * @returns {string[]} zero or one advisory message.
  */
-export function plainLanguageAdvisories(kind, content) {
+export function progressAdvisories(content) {
 	const text = typeof content === 'string' ? content : '';
-	if (text.trim() === '' || hasPlainLead(text)) return [];
-	const subject = kind === 'agents' ? 'AGENTS.md' : '这份文档';
-	return [
-		`Spec mode: ${subject}开头没有外行读得懂的白话导读。`
-			+ `第一个小节标题之前要有至少一段 ${PLAIN_LEAD_MIN_CHARS} 字以上的白话（不含代码、反引号、字段名、路径），`
-			+ '说明它回答什么问题、谁在什么场景下读、读完能做什么。写法见提示词「产出文档的写法：说人话」。',
-	];
+	if (text.trim() === '') return [];
+	for (const raw of text.split('\n')) {
+		const line = raw.trim();
+		if (line === '' || !STRUCTURAL_LINE_RE.test(line) || !PROGRESS_RE.test(line)) continue;
+		// The rule that forbids the record is not a record of one.
+		if (PROGRESS_PROHIBITION_RE.test(line)) continue;
+		return [
+			`Spec mode: AGENTS.md 里出现了进度类内容：「${excerptOf(line)}」。`
+				+ '这份文件只放文档索引与开发规范规则——不写现状、进度、待办、下一步、里程碑、'
+				+ '已完成或未完成清单、变更记录。它是每个会话都读进上下文的基线，进度会挤占规则的位置、'
+				+ '而且很快过期没人删。进度属于提交历史、issue 或对话。'
+				+ '见提示词「完成后的落盘顺序」。',
+		];
+	}
+	return [];
 }
 
 /**
@@ -373,10 +350,10 @@ export function decisionRationaleAdvisories(content) {
 
 /**
  * Every advisory for one deliverable write, in a stable order: the AGENTS.md
- * line budget and its required rule block first (both change what the file does
- * as a baseline), then the writing checks — code without a reproduction step,
- * the lead a layperson can read, and the rejected alternative that must not be
- * recorded.
+ * line budget, its required rule block, and its ban on progress content first
+ * (all three change what the file does as a baseline), then the writing checks —
+ * code without a reproduction step, and the rejected alternative that must not
+ * be recorded.
  * @param {'agents' | 'doc'} kind - which deliverable this is.
  * @param {string} content - the exact content being written.
  * @returns {string[]} zero or more advisory messages.
@@ -385,8 +362,8 @@ export function deliverableAdvisories(kind, content) {
 	return [
 		...(kind === 'agents' ? agentsMdAdvisories(content) : []),
 		...(kind === 'agents' ? documentationRulesAdvisories(content) : []),
+		...(kind === 'agents' ? progressAdvisories(content) : []),
 		...reproductionAdvisories(content),
-		...plainLanguageAdvisories(kind, content),
 		...decisionRationaleAdvisories(content),
 	];
 }
