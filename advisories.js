@@ -87,22 +87,76 @@ const PROGRESS_PROHIBITION_RE = /(不写|不记|不要写|别写|禁止写|不�
  * Wording that means a decision was written down together with the alternative
  * it replaced. Matched only on structural lines, so prose that merely mentions
  * an alternative does not fire.
+ *
+ * The verb forms matter as much as the noun forms: 「否决了 Redis」 and 「放弃
+ * Kafka」 are how a person actually writes the record, and a table that lists
+ * only 「被否决」 misses every one of them.
  */
-const REJECTION_RE = /(为什么不|为何不|不选它|不采用|被否决|否决的|替代方案|备选方案|rejected|alternatives?\s+considered|why\s+not)/i;
+const REJECTION_RE = /(为什么不|为何不|不选它|不采用|不用|不要用|否决|放弃|抛弃|弃用|改用|换成|替代方案|备选方案|替代|取代|rejected|alternatives?\s+considered|why\s+not|instead\s+of)/i;
 
 /**
- * A line that forbids the rejection record rather than making one — the rule
- * statement itself. Such a line is about the practice, not an instance of it.
+ * A line that forbids the record rather than making one — the rule statement
+ * itself. The verb list covers how a rule is actually written, not just `不写`:
+ * `不出现`, `一律不保留`, `不收录` all forbid the same practice, and a rule file
+ * that spells it one of those ways must not be reported as breaking its own rule.
  */
-const PROHIBITION_RE = /(不写|不记|不要写|别写|禁止写|不需要写|避免写|不记录)/;
+const PROHIBITION_RE = /(不写|不记|不要写|别写|禁止写|不允许写|不需要写|避免写|不记录|不出现|不保留|不收录|不放进|不纳入|一律不|不得写|禁止出现)/;
 
 /**
  * Section headings that carry no fact a reader can use. A document states
  * conclusions; motivation, background and reasoning are the explanation it must
  * not contain, a glossary defines what the text should say in passing, and a
  * lead or a summary restates what the rest already says.
+ *
+ * Matched as whole titles, never as substrings: `背景色` is a configuration
+ * value and `总结性数据` is a dataset, and reporting either would have the model
+ * rename a correct heading. See {@link isFillerTitle}.
  */
-const FILLER_HEADING_RE = /(?:导读|引言|前言|背景|动机|初衷|由来|缘起|历史|沿革|为什么|设计考量|设计思路|设计权衡|权衡|取舍|术语表|术语解释|名词解释|本章小结|小结|总结|综上|后记|结语)/;
+const FILLER_HEADING_ALWAYS = [
+	'导读', '引言', '前言', '后记', '结语', '综上', '本章小结',
+	'术语表', '术语解释', '名词解释',
+	'设计考量', '设计思路', '设计权衡',
+	'动机', '初衷', '由来', '缘起',
+	'概述', '概要', '概览',
+	// English equivalents, because a heading in English carries the same content.
+	'background', 'motivation', 'rationale', 'history', 'summary', 'overview',
+	'conclusion', 'introduction', 'preface', 'glossary', 'tradeoffs', 'trade-offs',
+];
+
+/**
+ * Words that name a filler section wherever they sit, including after a subject.
+ *
+
+ * `沿革` only ever fills a qualifier slot (`技术沿革`); `历史` is a history
+ * section in `版本历史` and `历史与现状`, but `历史数据` names a dataset — hence
+ * {@link FACTUAL_TAIL_RE} rather than an unconditional match. `动机` closes
+ * `设计动机` the same way.
+ */
+const FILLER_HEADING_SUBSTRING = ['沿革', '演进历史', '变更历史', '历史与', '版本历史', '历史版本', '综上所述', '综上所'];
+
+/**
+ * Headings whose word also begins a compound naming a fact. These report when
+ * the word stands alone, is joined to a sibling idea (`背景与目标`), or takes a
+ * subject (`项目背景`, `目标与背景`). `背景色` and `背景图` name a value or an
+ * asset, so a compound that continues into a concrete noun stays out.
+ */
+const FILLER_HEADING_COMPOUND = ['背景', '小结', '总结', '权衡', '取舍', '历史', '动机', '愿景', '缘起'];
+
+/**
+ * A compound-prone word followed by a concrete noun names a fact, not a filler
+ * section — `背景色`, `背景图`, `总结性数据`, `权衡参数`.
+ */
+const FACTUAL_TAIL_RE = /^(?:色|图|图像|图片|音乐|数据|版本号|版本表|版本信息|记录|字段|参数|规则|时间|表|值|文件|目录|配置|编号|数量|面积|图层)/;
+
+/** A heading that asks why, which is the explanation the document must not hold. */
+const FILLER_HEADING_PREFIX = ['为什么', '为何', 'why '];
+
+/**
+ * What may follow a compound-prone word and still leave the title a filler
+ * section: a conjunction, a separator, or an opening bracket that introduces a
+ * sibling subject.
+ */
+const SIBLING_TAIL_RE = /^(?:与|和|及|以及|、|：|:|\/|（|\()/;
 
 /** Heads that introduce a block whose text is the reader's reference. */
 const HEADING_RE = /^\s*#{1,6}\s+\S/;
@@ -112,6 +166,47 @@ const BOLD_LABEL_RE = /^\s*\*\*\S/;
 
 /** Longest a labelled line may run before it reads as prose rather than a title. */
 const TITLE_MAX_CHARS = 40;
+
+/**
+ * Whether a block title is a section that only explains.
+ *
+ * Three ways a title names a filler section, checked in order of certainty:
+ * it asks why; it is one of the headings that never carry a fact; or it holds
+ * a filler word in a position where the word still names the section — alone,
+ * joined to a sibling, or after a subject (`项目背景`). A word that continues
+ * into a concrete noun (`背景色`, `权衡参数`) names a fact and stays out.
+ *
+ * @param {string} label - the title, already stripped of its marker.
+ * @returns {boolean} true when the section carries no fact a reader can use.
+ */
+function isFillerTitle(label) {
+	// A trailing colon or a parenthetical note belongs to the heading style, not
+	// to its meaning: `## 历史：` and `## 术语表（缩略语）` name the same section
+	// as their bare forms.
+	const title = label
+		.trim()
+		.toLowerCase()
+		.replace(/[：:]\s*$/, '')
+		.replace(/[（(][^）)]*[）)]\s*$/, '')
+		.trim();
+	if (title === '') return false;
+	if (FILLER_HEADING_PREFIX.some((prefix) => title.startsWith(prefix))) return true;
+	if (FILLER_HEADING_ALWAYS.includes(title)) return true;
+	if (FILLER_HEADING_SUBSTRING.some((word) => title.includes(word))) return true;
+	for (const word of FILLER_HEADING_COMPOUND) {
+		// The word ends the title, opens it, or closes it after a subject.
+		if (title === word || title.endsWith(word)) return true;
+		const at = title.indexOf(word);
+		if (at < 0) continue;
+		const tail = title.slice(at + word.length);
+		if (tail === '') return true;
+		if (FACTUAL_TAIL_RE.test(tail)) continue;
+		if (SIBLING_TAIL_RE.test(tail)) return true;
+		// `项目背景` — a subject precedes the word and nothing factual follows it.
+		if (at > 0) return true;
+	}
+	return false;
+}
 
 /**
  * Whether a structural line reads as a title rather than as prose carrying a
@@ -323,20 +418,24 @@ export function documentationRulesAdvisories(content) {
 export function progressAdvisories(content) {
 	const text = typeof content === 'string' ? content : '';
 	if (text.trim() === '') return [];
+	const offending = [];
 	for (const raw of text.split('\n')) {
 		const line = raw.trim();
 		if (line === '' || !STRUCTURAL_LINE_RE.test(line) || !PROGRESS_RE.test(line)) continue;
 		// The rule that forbids the record is not a record of one.
 		if (PROGRESS_PROHIBITION_RE.test(line)) continue;
-		return [
-			`Spec mode: AGENTS.md 里出现了进度类内容：「${excerptOf(line)}」。`
-				+ '这份文件只放文档索引与开发规范规则——不写现状、进度、待办、下一步、里程碑、'
-				+ '已完成或未完成清单、变更记录。它是每个会话都读进上下文的基线，进度会挤占规则的位置、'
-				+ '而且很快过期没人删。进度属于提交历史、issue 或对话。'
-				+ '见提示词「完成后的落盘顺序」。',
-		];
+		offending.push(line);
 	}
-	return [];
+	if (offending.length === 0) return [];
+	const shown = offending.slice(0, 3).map((line) => `「${excerptOf(line)}」`).join('');
+	const more = offending.length > 3 ? `等 ${offending.length} 处` : '';
+	return [
+		`Spec mode: AGENTS.md 里出现了进度类内容：${shown}${more}。`
+			+ '这份文件只放文档索引与开发规范规则——不写现状、进度、待办、下一步、里程碑、'
+			+ '已完成或未完成清单、变更记录。它是每个会话都读进上下文的基线，进度会挤占规则的位置、'
+			+ '而且很快过期没人删。进度属于提交历史、issue 或对话。'
+			+ '见提示词「完成后的落盘顺序」。',
+	];
 }
 
 /**
@@ -371,6 +470,15 @@ export function reproductionAdvisories(content) {
 }
 
 /**
+ * A line records a *rejection* when it says an option was turned down or that
+ * something was chosen instead. Mere replacement (`改用 SQLite（此前为 MySQL）`)
+ * states a current value beside a retired one — that is a superseded value, and
+ * {@link supersededAdvisories} reports it. Reporting it here too would accuse the
+ * document of a rejected-alternative record it does not contain.
+ */
+const REJECTION_REASON_RE = /(为什么不|为何不|不选它|否决|放弃|抛弃|替代方案|备选方案|被排除|排除掉|rejected|alternatives?\s+considered|why\s+not|instead\s+of)/i;
+
+/**
  * Advisory messages for a deliverable that records a decision together with the
  * alternative it beat.
  * @param {string} content - the exact content being written.
@@ -378,18 +486,22 @@ export function reproductionAdvisories(content) {
  */
 export function decisionRationaleAdvisories(content) {
 	const text = typeof content === 'string' ? content : '';
+	const offending = [];
 	for (const raw of text.split('\n')) {
 		const line = raw.trim();
-		if (line === '' || !STRUCTURAL_LINE_RE.test(line) || !REJECTION_RE.test(line)) continue;
+		if (line === '' || !STRUCTURAL_LINE_RE.test(line) || !REJECTION_REASON_RE.test(line)) continue;
 		// The rule that forbids the record is not a record of one.
 		if (PROHIBITION_RE.test(line)) continue;
-		return [
-			'Spec mode: 文档里出现了「为什么不选别的方案」的痕迹：'
-				+ `「${excerptOf(line)}」。决策只记结论——定了什么、约束谁、怎么用；`
-				+ '被否决方案与理由删掉。见提示词「决策只记结论，不记否决理由」。',
-		];
+		offending.push(line);
 	}
-	return [];
+	if (offending.length === 0) return [];
+	const shown = offending.slice(0, 3).map((line) => `「${excerptOf(line)}」`).join('');
+	const more = offending.length > 3 ? `等 ${offending.length} 处` : '';
+	return [
+		`Spec mode: 文档里出现了「为什么不选别的方案」的痕迹：${shown}${more}。`
+			+ '决策只记结论——定了什么、约束谁、怎么用；被否决方案与理由删掉。'
+			+ '见提示词「决策只记结论，不记否决理由」。',
+	];
 }
 
 /**
@@ -404,29 +516,144 @@ export function decisionRationaleAdvisories(content) {
  */
 export function reasonAdvisories(content) {
 	const text = typeof content === 'string' ? content : '';
+	const offending = [];
 	for (const raw of text.split('\n')) {
 		const line = raw.trim();
 		if (line === '' || !isBlockTitle(line)) continue;
 		const label = titleLabel(line);
-		if (!FILLER_HEADING_RE.test(label)) continue;
+		if (!isFillerTitle(label)) continue;
 		// The rule that forbids such a section is not one.
 		if (PROHIBITION_RE.test(label)) continue;
-		return [
-			`Spec mode: 文档里出现了不写事实的小节：「${excerptOf(label)}」。`
-				+ '文档只写结论与硬事实——写了什么、怎么用、什么条件下不成立、下一步做什么；'
-				+ '动机、背景、设计考量、小结这类小节删掉，开场不铺引言，结尾不做总结，'
-				+ '纯事实的清单（命令、文件、参数）除外。见提示词「产出文档的写法：只写结论，写干货」。',
-		];
+		offending.push(label);
 	}
-	return [];
+	if (offending.length === 0) return [];
+	const shown = offending.slice(0, 3).map((label) => `「${excerptOf(label)}」`).join('');
+	const more = offending.length > 3 ? `等 ${offending.length} 处` : '';
+	return [
+		`Spec mode: 文档里出现了不写事实的小节：${shown}${more}。`
+			+ '文档只写结论与硬事实——写了什么、怎么用、什么条件下不成立、下一步做什么；'
+			+ '动机、背景、设计考量、小结这类小节删掉，开场不铺引言，结尾不做总结，'
+			+ '纯事实的清单（命令、文件、参数）除外。见提示词「产出文档的写法：只写结论，写干货」。',
+	];
 }
 
+/**
+ * The three shapes a superseded value can take. Each is evidence the line holds
+ * two answers for one slot — the shape itself, not a guess about wording.
+ *
+ * The earlier version tried to infer the same thing from a marker word plus how
+ * many characters sat between it and a value. That approach could not separate a
+ * migration (`旧的实现依赖 request`) from an instruction (`改为返回错误码 E_INVALID`)
+ * — both are a marker, a gap, and a value — and it produced false reports on
+ * every imperative sentence in a development guide. These three shapes do not
+ * have that ambiguity, so nothing is inferred from distance.
+ *
+ * 1. **A parenthetical past value** — `vite（原 webpack）`. The bracket marks the
+ *    aside, and an aside is where a retired value goes.
+ * 2. **A table column pair or a single arrow** — `| 旧值 | 当前值 |`, `a → b`.
+ *    The layout states the pair. An arrow chain (`api → core → infra`) is a
+ *    dependency direction, not a replacement, so only one hop counts.
+ * 3. **A deprecation state** — `v1 已弃用`, `JQuery 已被移除`, `deprecated: x`.
+ *    A dead value beside a live one, in either order.
+ *
+ * Anything else is left to the prompt. A missed report costs one stale value;
+ * a false report has the model delete a correct instruction, which is worse.
+ */
+
+/** A value: a backticked token, a version, a number, or an identifier. */
+const SUPERSEDED_VALUE_PATTERN = String.raw`(?:\`[^\`]+\`|v?\d+(?:\.\d+)+|[A-Za-z][A-Za-z0-9_.+#-]{0,30}|\d+)`;
+
+/** A past-state word, and whatever connective sits between it and its value. */
+const PARENTHETICAL_PAST_RE = new RegExp(
+	String.raw`[（(]\s*(?:此前为|此前用|此前|原先|原来|原本|原为|原址|原|旧版|旧方案|旧实现|旧|曾用|曾|曾经|历史)\s*(?:了|为|是|用|的)?\s*`
+		+ SUPERSEDED_VALUE_PATTERN
+		+ String.raw`\s*[）)]`,
+	'i',
+);
+
+/** A table header naming the retired column and the current one. */
+const TABLE_OLD_COLUMN_RE = /(旧值|旧版|旧数据|old|before|previous)/i;
+const TABLE_CURRENT_COLUMN_RE = /(新值|新版|当前值|现值|current|new|after)/i;
+
+/** One value replaced by another, written as a single arrow. */
+const REPLACEMENT_ARROW_RE = new RegExp(SUPERSEDED_VALUE_PATTERN + String.raw`\s*(?:→|⇒)\s*` + SUPERSEDED_VALUE_PATTERN);
+
+/** A line describing a flow or dependency direction rather than a replacement. */
+const FLOW_DIRECTION_RE = /(依赖|数据流|调用链|流向|分层|上游|下游|flow|pipeline|=>|->)/i;
+
+/** A value the line marks as dead before naming its replacement. */
+const DEPRECATION_ACTIVE_RE = new RegExp(
+	String.raw`(?:已弃用|已废弃|已移除|已删除|已下线|deprecated|obsolete|legacy)\s*[:：]?\s*`
+		+ SUPERSEDED_VALUE_PATTERN,
+	'i',
+);
+
+/** A value the line marks as dead after naming it — `JQuery 已被移除`. */
+const DEPRECATION_PASSIVE_RE = new RegExp(
+	SUPERSEDED_VALUE_PATTERN
+		+ String.raw`\s*(?:已|被)\s*[^\n]{0,12}?(?:弃用|废弃|移除|删除|下线|淘汰|取代|替换)`,
+	'i',
+);
+
+/** A component the line marks as dead without naming a value — `该字段已废弃`. */
+const DEPRECATION_SUBJECT_RE = /(?:该|这个|此)?\s*(?:字段|接口|API|端点|方法|协议|版本|选项|参数)\s*已(?:弃用|废弃|移除|删除|下线|淘汰)/i;
+
+/**
+ * Whether one line holds two answers for one slot.
+ * @param {string} line - the trimmed line.
+ * @returns {boolean} true when the line records a superseded value.
+ */
+function isSupersededLine(line) {
+	if (line === '') return false;
+	if (PARENTHETICAL_PAST_RE.test(line)) return true;
+	if (REPLACEMENT_ARROW_RE.test(line) && !FLOW_DIRECTION_RE.test(line)) {
+		if ((line.match(/→|⇒/g) ?? []).length === 1) return true;
+	}
+	if (TABLE_OLD_COLUMN_RE.test(line) && TABLE_CURRENT_COLUMN_RE.test(line)) return true;
+	if (DEPRECATION_PASSIVE_RE.test(line)) return true;
+	if (DEPRECATION_ACTIVE_RE.test(line)) return true;
+	return DEPRECATION_SUBJECT_RE.test(line);
+}
+
+/**
+ * Advisory messages for a deliverable that records what the project used to use.
+ *
+ * A document answers what is true now; the previous value is a second answer to
+ * the same question, and a long context has no way to tell which one still holds.
+ * The rule has no exception for facts a reader might need — a compatibility
+ * statement belongs in the README, not in the reference.
+ *
+ * @param {string} content - the exact content being written.
+ * @returns {string[]} zero or more advisory messages.
+ */
+export function supersededAdvisories(content) {
+	const text = typeof content === 'string' ? content : '';
+	if (text.trim() === '') return [];
+	const offending = [];
+	for (const raw of text.split('\n')) {
+		const line = raw.trim();
+		if (!isSupersededLine(line)) continue;
+		// The rule that forbids the record is not a record of one.
+		if (PROHIBITION_RE.test(line)) continue;
+		offending.push(line);
+	}
+	if (offending.length === 0) return [];
+	const shown = offending.slice(0, 3).map((line) => `「${excerptOf(line)}」`).join('');
+	const more = offending.length > 3 ? `等 ${offending.length} 处` : '';
+	return [
+		`Spec mode: 文档里记着已被取代的值：${shown}${more}。`
+			+ '文档只留当前值——同一件事出现旧值与新值两个答案，上下文一长就分不清哪个还算数。'
+			+ '旧值、迁移过程、此前用过什么都删掉；读者必须知道兼容性事实，写在 README 里，不写进 docs/。'
+			+ '见提示词「产出文档的写法：只写结论，写干货」。',
+	];
+}
 /**
  * Every advisory for one deliverable write, in a stable order: the AGENTS.md
  * line budget, its required rule block, and its ban on progress content first
  * (all three change what the file does as a baseline), then the writing checks —
- * code without a reproduction step, the self-explaining section that must not be
- * written, and the rejected alternative that must not be recorded.
+ * the superseded value that leaves two answers to one question, code without a
+ * reproduction step, the self-explaining section that must not be written, and
+ * the rejected alternative that must not be recorded.
  * @param {'agents' | 'doc'} kind - which deliverable this is.
  * @param {string} content - the exact content being written.
  * @returns {string[]} zero or more advisory messages.
@@ -436,6 +663,7 @@ export function deliverableAdvisories(kind, content) {
 		...(kind === 'agents' ? agentsMdAdvisories(content) : []),
 		...(kind === 'agents' ? documentationRulesAdvisories(content) : []),
 		...(kind === 'agents' ? progressAdvisories(content) : []),
+		...supersededAdvisories(content),
 		...reproductionAdvisories(content),
 		...reasonAdvisories(content),
 		...decisionRationaleAdvisories(content),
