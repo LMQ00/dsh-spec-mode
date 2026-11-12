@@ -388,7 +388,10 @@ window.__ModuleLoader__.load({
 				font: 'inherit',
 				fontSize: 12,
 			},
-			row: { display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 },
+			// Wrapping: the add-controls row holds a button, two selects and a third
+			// select, which is wider than the brief column once the window is small.
+			// Without this the last one hangs past the page's right edge.
+			row: { display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6, flexWrap: 'wrap' },
 			rowCard: {
 				border: '1px solid var(--dsw-alias-border-l1)',
 				borderRadius: 8,
