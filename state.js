@@ -1,7 +1,7 @@
 /**
  * Spec-mode state: the session-log projection that owns "is spec mode on for
- * this session", plus the draft-path resolution that both the guard and the
- * interview protocol use.
+ * this session", plus the path resolution that the guard, the interview
+ * protocol and the landing step share.
  *
  * DSH forbids a plugin from appending a new session event type (`SessionEventMap`
  * is merge-extensible for typing, but the persistence read path refuses a log
@@ -31,16 +31,25 @@ export const PROJECTION_KEY = 'spec';
 /** Bump whenever the state fields or the fold semantics change. */
 export const PROJECTION_VERSION = 1;
 
-/** The draft lives in the project's documentation directory, not in agent state. */
-export const DRAFT_DIR = 'docs';
+/** Working directory the products and the draft live in, relative to the anchor. */
+export const SPEC_DIR = '.spec';
 
-/** The draft's file name. */
-export const DRAFT_BASENAME = 'spec-draft.md';
+/** The interview draft: the only file the guard lets the model write. */
+export const DRAFT_BASENAME = 'draft.md';
+
+/** The requirement brief: what a later model reads as its plan. */
+export const BRIEF_BASENAME = 'brief.md';
+
+/** The functional flow chart: a picture, the only product a person opens. */
+export const FLOW_IMAGE_BASENAME = 'flow.png';
+
+/** The same chart as SVG, kept only when no rasterizer is available. */
+export const FLOW_VECTOR_BASENAME = 'flow.svg';
 
 /**
  * DSH's own project-root marker. `@deepseek-ai/dsh-agent-instructions` resolves
  * the project root with `projectRootMarkers` defaulting to `['.git']` and falls
- * back to the session cwd; anchoring the draft the same way keeps the draft
+ * back to the session cwd; anchoring the products the same way keeps them
  * inside the same project the instruction files come from.
  */
 const PROJECT_ROOT_MARKERS = ['.git'];
@@ -64,22 +73,60 @@ export function findProjectAnchor(cwd) {
 }
 
 /**
+ * Absolute path of the spec working directory for one cwd.
+ * @param {string} cwd - the session working directory.
+ * @returns {string} the absolute `.spec` directory.
+ */
+export function resolveSpecDir(cwd) {
+	return join(findProjectAnchor(cwd), SPEC_DIR);
+}
+
+/**
  * Absolute path of the interview draft for one working directory.
  * @param {string} cwd - the session working directory.
  * @returns {string} the absolute draft path.
  */
 export function resolveDraftPath(cwd) {
-	return join(findProjectAnchor(cwd), DRAFT_DIR, DRAFT_BASENAME);
+	return join(resolveSpecDir(cwd), DRAFT_BASENAME);
 }
 
 /**
- * Create the draft's parent directory without going through the tool layer, so
- * the guard never has to allow writes to `docs/` as a directory.
- * @param {string} filePath - the absolute draft path.
+ * Absolute path of the requirement brief for one working directory.
+ * @param {string} cwd - the session working directory.
+ * @returns {string} the absolute brief path.
  */
-export function ensureParentDir(filePath) {
+export function resolveBriefPath(cwd) {
+	return join(resolveSpecDir(cwd), BRIEF_BASENAME);
+}
+
+/**
+ * Absolute path of the functional flow chart for one working directory. The
+ * chart is a raster image; {@link resolveFlowVectorPath} is the fallback the
+ * plugin keeps only when no rasterizer is installed.
+ * @param {string} cwd - the session working directory.
+ * @returns {string} the absolute chart path.
+ */
+export function resolveFlowImagePath(cwd) {
+	return join(resolveSpecDir(cwd), FLOW_IMAGE_BASENAME);
+}
+
+/**
+ * Absolute path of the vector fallback for one working directory.
+ * @param {string} cwd - the session working directory.
+ * @returns {string} the absolute SVG path.
+ */
+export function resolveFlowVectorPath(cwd) {
+	return join(resolveSpecDir(cwd), FLOW_VECTOR_BASENAME);
+}
+
+/**
+ * Create the spec directory without going through the tool layer, so the guard
+ * never has to allow writes to `.spec/` as a directory.
+ * @param {string} dirPath - the absolute `.spec` directory.
+ */
+export function ensureSpecDir(dirPath) {
 	try {
-		mkdirSync(dirname(filePath), { recursive: true });
+		mkdirSync(dirPath, { recursive: true });
 	} catch {
 		// A concurrent creation or an unwritable parent surfaces later as a tool error.
 	}

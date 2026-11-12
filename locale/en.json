@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Spec Mode",
-    "description": "Interview-driven requirements capture: incremental draft writing, a read-only working tree, and a reviewed exit that lands AGENTS.md plus docs/. Deliverables state conclusions and hard facts, never the reasoning behind them — short and dense, readable by a layperson; code only as a step to perform, and then always with how to run it."
+    "description": "Interview-driven requirements capture: incremental draft writing, a read-only working tree, and a reviewed landing of two products — .spec/brief.md, a requirements-only brief a later model reads as its plan, and .spec/flow.png, a flow chart image for a person — plus an updated AGENTS.md."
   }
 }

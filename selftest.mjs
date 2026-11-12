@@ -1,7 +1,7 @@
 /**
  * Dependency-free smoke test for the pure modules of dsh-spec-mode.
- * It exercises the parts that decide behavior — the draft anchor, the path
- * predicate, the projection fold, and the deliverable advisories — without a
+ * It exercises the parts that decide behavior — the `.spec` anchor, the path
+ * predicate, the projection fold, and the two product validators — without a
  * Host.
  *
  * Run: node selftest.mjs
@@ -12,26 +12,82 @@ import { mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import {
-	agentsMdAdvisories,
-	agentsMdWriteContent,
-	decisionRationaleAdvisories,
-	deliverableAdvisories,
-	documentationRulesAdvisories,
-	progressAdvisories,
-	reasonAdvisories,
-	reproductionAdvisories,
-	specDeliverableWrite,
-	supersededAdvisories,
-} from './advisories.js';
+import { agentsMdAdvisories, deliverableAdvisories, progressAdvisories, specDeliverableWrite } from './advisories.js';
+import { parseBrief, renderBrief, validateBrief } from './brief.js';
+import { backEdgesOf, validateFlow } from './flow.js';
+import { renderFlowSvg, layersOf, wrapLabel } from './flow-svg.js';
+import { svgSize } from './rasterize.js';
 import { classifyTarget, extractTargetPaths, isDestructiveTool, isWriteTool } from './guard.js';
-import { createSpecProjection, findProjectAnchor, resolveDraftPath } from './state.js';
+import {
+	createSpecProjection,
+	findProjectAnchor,
+	resolveBriefPath,
+	resolveDraftPath,
+	resolveFlowImagePath,
+	resolveFlowVectorPath,
+	resolveSpecDir,
+} from './state.js';
 
 let passed = 0;
 function check(label, fn) {
 	fn();
 	passed += 1;
 	console.log(`ok - ${label}`);
+}
+
+/**
+ * Sample one SVG path (as the renderer writes it: `M`, `L`, `C` only) so a test
+ * can ask whether it runs through a rectangle.
+ *
+ * @param {string} d - the `d` attribute.
+ * @returns {[number, number][]} points every couple of pixels along the path.
+ */
+function sampleSvgPath(d) {
+	const tokens = d.match(/[MLC]|-?[\d.]+/g);
+	const points = [];
+	let current = [0, 0];
+	for (let index = 0; index < tokens.length; ) {
+		const command = tokens[index];
+		if (command === 'M') {
+			current = [Number(tokens[index + 1]), Number(tokens[index + 2])];
+			points.push(current);
+			index += 3;
+		} else if (command === 'L') {
+			const next = [Number(tokens[index + 1]), Number(tokens[index + 2])];
+			pushSegment(points, current, next, 2);
+			current = next;
+			index += 3;
+		} else if (command === 'C') {
+			const [c1x, c1y, c2x, c2y, endX, endY] = tokens.slice(index + 1, index + 7).map(Number);
+			for (let step = 1; step <= 48; step += 1) {
+				const t = step / 48;
+				const m = 1 - t;
+				points.push([
+					m ** 3 * current[0] + 3 * m * m * t * c1x + 3 * m * t * t * c2x + t ** 3 * endX,
+					m ** 3 * current[1] + 3 * m * m * t * c1y + 3 * m * t * t * c2y + t ** 3 * endY,
+				]);
+			}
+			current = [endX, endY];
+			index += 7;
+		} else {
+			index += 1;
+		}
+	}
+	return points;
+}
+
+/**
+ * Append points along one straight leg, `step` pixels apart.
+ * @param {[number, number][]} points - the accumulator.
+ * @param {[number, number]} from - the leg's start.
+ * @param {[number, number]} to - the leg's end.
+ * @param {number} step - the sampling distance.
+ */
+function pushSegment(points, from, to, step) {
+	const count = Math.max(2, Math.ceil(Math.hypot(to[0] - from[0], to[1] - from[1]) / step));
+	for (let index = 1; index <= count; index += 1) {
+		points.push([from[0] + ((to[0] - from[0]) * index) / count, from[1] + ((to[1] - from[1]) * index) / count]);
+	}
 }
 
 /* ---- project anchor ---- */
@@ -44,13 +100,21 @@ mkdirSync(join(project, '.git'), { recursive: true });
 
 check('anchor walks up to the nearest .git', () => {
 	assert.equal(findProjectAnchor(nested), project);
-	assert.equal(resolveDraftPath(nested), join(project, 'docs', 'spec-draft.md'));
+	assert.equal(resolveSpecDir(nested), join(project, '.spec'));
+});
+
+check('the product paths all live in the anchored .spec directory', () => {
+	assert.equal(resolveDraftPath(nested), join(project, '.spec', 'draft.md'));
+	assert.equal(resolveBriefPath(nested), join(project, '.spec', 'brief.md'));
+	assert.equal(resolveFlowImagePath(nested), join(project, '.spec', 'flow.png'));
+	assert.equal(resolveFlowVectorPath(nested), join(project, '.spec', 'flow.svg'));
 });
 
 check('anchor falls back to cwd without a marker', () => {
 	const bare = join(sandbox, 'bare', 'deep');
 	mkdirSync(bare, { recursive: true });
 	assert.equal(findProjectAnchor(bare), bare);
+	assert.equal(resolveDraftPath(bare), join(bare, '.spec', 'draft.md'));
 });
 
 /* ---- path classification ---- */
@@ -59,10 +123,12 @@ const draft = resolveDraftPath(nested);
 
 check('the draft itself is allowed, everything else is the working tree', () => {
 	assert.equal(classifyTarget(draft, nested, draft), 'draft');
-	assert.equal(classifyTarget('docs/spec-draft.md', project, draft), 'draft');
+	assert.equal(classifyTarget('.spec/draft.md', project, draft), 'draft');
+	assert.equal(classifyTarget('.spec/brief.md', project, draft), 'working-tree');
+	assert.equal(classifyTarget('.spec/flow.md', project, draft), 'working-tree');
+	assert.equal(classifyTarget('.spec', project, draft), 'working-tree');
 	assert.equal(classifyTarget('docs/notes.md', project, draft), 'working-tree');
 	assert.equal(classifyTarget('README.md', project, draft), 'working-tree');
-	assert.equal(classifyTarget('docs', project, draft), 'working-tree');
 });
 
 check('protocol paths pass and unparsable input fails closed', () => {
@@ -131,8 +197,7 @@ check('an unrelated command never moves the state', () => {
 
 check('command/run moves the pending selection before the handler runs', () => {
 	// The invariant the /spec handler relies on: `running.wanted` is already the
-	// new selection while `active` still holds the committed one. Reading the
-	// effective state inside a handler would therefore report the NEW value.
+	// new selection while `active` still holds the committed one.
 	const committedOn = { active: true, running: null, exitCall: null };
 	const duringOff = run(committedOn, 'command/run', { commandId: 'c4', name: 'spec', args: ' off' });
 	assert.equal(duringOff.active, true);
@@ -178,31 +243,583 @@ check('the state schema accepts its own output and rejects junk', () => {
 	assert.throws(() => unit.stateSchema.parse({ active: true, running: { commandId: 1 } }));
 });
 
-/* ---- advisories ---- */
+/* ---- brief ---- */
 
-check('the line budget fires only above the limit', () => {
-	assert.deepEqual(agentsMdAdvisories('a\nb\nc'), []);
-	assert.equal(agentsMdAdvisories(Array.from({ length: 201 }, () => 'x').join('\n')).length, 1);
+const goodBrief = {
+	title: '导出功能',
+	goal: '用户在列表页能把当前筛选结果导出成一份 CSV。',
+	requirements: ['列表页右上角有「导出」按钮。', '导出范围是当前筛选结果，不是全部数据。'],
+	acceptance: ['点「导出」后 3 秒内下载到文件，文件行数等于列表行数。', '未筛选时导出全部，`node check.mjs` 退出码 0。'],
+	constraints: ['只支持 CSV。'],
+};
+
+check('a complete brief validates and renders its four sections', () => {
+	const outcome = validateBrief(goodBrief);
+	assert.equal(outcome.ok, true);
+	const text = renderBrief(outcome.brief);
+	assert.ok(text.startsWith('# 导出功能\n'));
+	for (const heading of ['## 目标', '## 要做什么', '## 验收', '## 约束']) assert.ok(text.includes(heading), `${heading} 缺失`);
+	assert.ok(text.endsWith('\n'));
 });
 
-check('only a successful write of AGENTS.md is inspected', () => {
-	assert.equal(agentsMdWriteContent('write', { file_path: 'AGENTS.md', content: 'hi' }, false), 'hi');
-	assert.equal(agentsMdWriteContent('write', { file_path: 'docs/AGENTS.md', content: 'hi' }, false), 'hi');
-	assert.equal(agentsMdWriteContent('edit', { file_path: 'AGENTS.md' }, false), undefined);
-	assert.equal(agentsMdWriteContent('write', { file_path: 'AGENTS.md', content: 'hi' }, true), undefined);
-	assert.equal(agentsMdWriteContent('write', { file_path: 'README.md', content: 'hi' }, false), undefined);
+check('an empty constraints list omits the section', () => {
+	const outcome = validateBrief({ ...goodBrief, constraints: [] });
+	assert.equal(outcome.ok, true);
+	const text = renderBrief(outcome.brief);
+	assert.equal(text.includes('## 约束'), false);
+	assert.ok(text.includes('## 验收'));
 });
+
+check('a brief rejects missing and empty fields with a field path', () => {
+	const missing = validateBrief({ title: 'x' });
+	assert.equal(missing.ok, false);
+	assert.ok(missing.errors.some((error) => error.startsWith('brief.goal')));
+	assert.ok(missing.errors.some((error) => error.startsWith('brief.requirements')));
+	assert.ok(missing.errors.some((error) => error.startsWith('brief.acceptance')));
+
+	const emptyList = validateBrief({ ...goodBrief, requirements: [] });
+	assert.equal(emptyList.ok, false);
+	assert.ok(emptyList.errors[0].startsWith('brief.requirements'));
+
+	const blankItem = validateBrief({ ...goodBrief, requirements: ['导出按钮。', '  '] });
+	assert.equal(blankItem.ok, false);
+	assert.equal(blankItem.errors[0], 'brief.requirements[1]: 不能为空');
+});
+
+check('a brief rejects code, including a fence smuggled into one bullet', () => {
+	for (const bad of ['```js\nconsole.log(1)\n```', '调用 `doExport()` 完成任务。', '需求\n```js\nconst a = 1;\n```']) {
+		const outcome = validateBrief({ ...goodBrief, requirements: [bad] });
+		assert.equal(outcome.ok, false, bad);
+		// A multi-line bullet is caught as a line-break violation before the fence
+		// rule sees it; both readings reject the same input.
+		assert.ok(/代码|一行/.test(outcome.errors[0]), outcome.errors[0]);
+	}
+});
+
+check('a brief keeps a runnable command: an acceptance check is a command', () => {
+	for (const good of [
+		'运行 `node selftest.mjs`，退出码 0。',
+		'用 `wc -l` 计得 1001 行。',
+		'运行 `node check.mjs --format=csv`，退出码 0。',
+		'运行 `NODE_ENV=test node check.mjs`，退出码 0。',
+		'执行 /spec off 退出。',
+	]) {
+		const outcome = validateBrief({ ...goodBrief, acceptance: [good] });
+		assert.equal(outcome.ok, true, `${good} → ${outcome.ok ? '' : outcome.errors[0]}`);
+	}
+	// A call or a block in backticks is still code, commands are not.
+	for (const bad of ['调用 `doExport()` 完成任务。', '用 `a => b` 传参。', '返回 `{ok:true}`。']) {
+		const outcome = validateBrief({ ...goodBrief, acceptance: [bad] });
+		assert.equal(outcome.ok, false, bad);
+		assert.ok(outcome.errors[0].includes('代码'), outcome.errors[0]);
+	}
+});
+
+check('a bullet carrying a line break is rejected rather than silently halved', () => {
+	// The renderer writes one bullet per item, so a second line would be read
+	// back as nothing — the requirement would disappear at landing time.
+	const outcome = validateBrief({ ...goodBrief, requirements: ['第一行\n第二行'] });
+	assert.equal(outcome.ok, false);
+	assert.ok(outcome.errors[0].includes('一行'), outcome.errors[0]);
+});
+
+check('a brief rejects reasoning and background', () => {
+	for (const bad of ['先做导出，因为用户要求。', '之所以选 CSV，是为了兼容 Excel。', '权衡之后只做 CSV。', '背景：用户之前用 Excel 导出。']) {
+		const outcome = validateBrief({ ...goodBrief, requirements: [bad] });
+		assert.equal(outcome.ok, false, bad);
+		assert.ok(outcome.errors[0].includes('理由'), outcome.errors[0]);
+	}
+});
+
+check('a brief rejects machine-specific paths and multi-line fields', () => {
+	const absolute = validateBrief({ ...goodBrief, acceptance: ['把文件写到 /home/lmq/out.csv。'] });
+	assert.equal(absolute.ok, false);
+	assert.ok(absolute.errors[0].includes('绝对路径'));
+
+	const multiline = validateBrief({ ...goodBrief, goal: '第一行\n第二行' });
+	assert.equal(multiline.ok, false);
+	assert.ok(multiline.errors[0].includes('一行'));
+});
+
+check('a value that would read back as a heading is rejected', () => {
+	// The renderer puts each value on its own line, so `## 目标` as a goal would
+	// be read back as a new empty section and the sentence would vanish.
+	for (const field of ['title', 'goal']) {
+		const outcome = validateBrief({ ...goodBrief, [field]: '## 目标' });
+		assert.equal(outcome.ok, false, field);
+		assert.ok(outcome.errors[0].includes('#'), outcome.errors[0]);
+	}
+	const requirement = validateBrief({ ...goodBrief, requirements: ['## 要做什么'] });
+	assert.equal(requirement.ok, false);
+	assert.ok(requirement.errors[0].includes('#'));
+});
+
+check('a rendered brief reads back into the same brief', () => {
+	const outcome = validateBrief(goodBrief);
+	const back = parseBrief(renderBrief(outcome.brief));
+	assert.equal(back.ok, true);
+	assert.deepEqual(back.brief, outcome.brief);
+});
+
+check('a hand-written brief with the right sections passes its advisory', () => {
+	const text = renderBrief(validateBrief(goodBrief).brief);
+	assert.deepEqual(deliverableAdvisories('brief', text), []);
+});
+
+check('a hand-written brief that explains itself is reported once', () => {
+	const text = '# 导出\n\n## 目标\n能导出。\n\n## 要做什么\n- 先做导出，因为要导出。\n\n## 验收\n- 能下载。\n';
+	const messages = deliverableAdvisories('brief', text);
+	assert.equal(messages.length, 1);
+	assert.ok(messages[0].includes('brief.md 不合格'));
+	assert.ok(messages[0].includes('理由'));
+});
+
+check('a hand-written brief missing a section is reported', () => {
+	const text = '# 导出\n\n## 目标\n能导出。\n\n## 要做什么\n- 有按钮。\n';
+	const messages = deliverableAdvisories('brief', text);
+	assert.equal(messages.length, 1);
+	assert.ok(messages[0].includes('验收'));
+	assert.deepEqual(deliverableAdvisories('brief', ''), ['Spec mode: brief.md 不合格——brief.md: 文件为空。'
+		+ 'brief 只写需求：`# 标题`，然后「## 目标」「## 要做什么」「## 验收」三节各一行一条，'
+		+ '「## 约束」可有可无；不写代码、不写为什么、不写背景与方案比较，不出现本机绝对路径。'
+		+ '改完再写一次覆盖它。']);
+});
+
+/* ---- flow ---- */
+
+const goodFlow = {
+	nodes: [
+		{ id: 'N1', label: '用户输入 /spec，模式打开' },
+		{ id: 'N2', label: '模型把需求逐条写进草稿' },
+		{ id: 'N3', label: '用户补充需求，草稿增量更新' },
+		{ id: 'N4', label: '用户确认后写两份产物' },
+	],
+	edges: [
+		{ from: 'N1', to: 'N2' },
+		{ from: 'N2', to: 'N3', when: '还有没问到的' },
+		{ from: 'N3', to: 'N4' },
+		{ from: 'N2', to: 'N4', when: '一次说清' },
+	],
+};
+
+check('a well-formed flow validates', () => {
+	const outcome = validateFlow(goodFlow);
+	assert.equal(outcome.ok, true);
+	assert.equal(outcome.flow.nodes.length, 4);
+	assert.equal(outcome.flow.edges.length, 4);
+});
+
+check('a flow has exactly one entry', () => {
+	// One procedure starts in one place; two sources means two stories stacked.
+	const twoStarts = validateFlow({
+		nodes: [{ id: 'A', label: 'a' }, { id: 'B', label: 'b' }, { id: 'C', label: 'c' }],
+		edges: [{ from: 'A', to: 'C' }, { from: 'B', to: 'C' }],
+	});
+	assert.equal(twoStarts.ok, false);
+	assert.ok(twoStarts.errors[0].includes('起点'), twoStarts.errors.join('；'));
+
+	// Several exits are legitimate: an attempt can end in more than one way —
+	// but a branch has to carry the condition that picks it.
+	const twoEnds = validateFlow({
+		nodes: [{ id: 'A', label: 'a' }, { id: 'B', label: 'b' }, { id: 'C', label: 'c' }],
+		edges: [{ from: 'A', to: 'B', when: '用户批准' }, { from: 'A', to: 'C', when: '用户拒绝' }],
+	});
+	assert.equal(twoEnds.ok, true);
+
+	const silentBranch = validateFlow({
+		nodes: [{ id: 'A', label: 'a' }, { id: 'B', label: 'b' }, { id: 'C', label: 'c' }],
+		edges: [{ from: 'A', to: 'B' }, { from: 'A', to: 'C' }],
+	});
+	assert.equal(silentBranch.ok, false);
+	assert.ok(silentBranch.errors[0].includes('when'), silentBranch.errors.join('；'));
+
+	const diamond = validateFlow({
+		nodes: [{ id: 'A', label: 'a' }, { id: 'B', label: 'b' }, { id: 'C', label: 'c' }, { id: 'D', label: 'd' }],
+		edges: [
+			{ from: 'A', to: 'B', when: '通过' },
+			{ from: 'A', to: 'C', when: '不通过' },
+			{ from: 'B', to: 'D' },
+			{ from: 'C', to: 'D' },
+		],
+	});
+	assert.equal(diamond.ok, true);
+});
+
+check('the chart is an SVG image with every node and edge drawn', () => {
+	const outcome = validateFlow(goodFlow);
+	const svg = renderFlowSvg(outcome.flow, '导出：功能流程');
+	assert.ok(svg.startsWith('<svg '), '必须是 SVG 文档');
+	assert.ok(svg.endsWith('</svg>\n'));
+	assert.ok(svg.includes('导出：功能流程'));
+	// One text element per label, plus the title and the two edge notes.
+	for (const node of outcome.flow.nodes) assert.ok(svg.includes(node.label) || wrapLabel(node.label).some((line) => svg.includes(line)), node.label);
+	assert.ok(svg.includes('还有没问到的'));
+	assert.ok(svg.includes('一次说清'));
+	// Every edge is a path with an arrow head.
+	assert.equal((svg.match(/marker-end="url\(#arrow\)"/g) ?? []).length, outcome.flow.edges.length);
+	const size = svgSize(svg);
+	assert.ok(size !== undefined);
+	assert.ok(size.width > 200 && size.height > 200, JSON.stringify(size));
+});
+
+check('layers stack every edge downward', () => {
+	// The rendering assumption: in a DAG each edge goes from a lower layer to a
+	// higher one, which is what makes a top-down picture readable.
+	const outcome = validateFlow(goodFlow);
+	const layers = layersOf(outcome.flow);
+	for (const edge of outcome.flow.edges) {
+		assert.ok(layers.get(edge.from) < layers.get(edge.to), `${edge.from} -> ${edge.to}`);
+	}
+});
+
+check('an edge that skips rows goes around the boxes, not through them', () => {
+	// A branch out of a long chain would otherwise draw down the column shared by
+	// every row, straight through the boxes standing in between.
+	const outcome = validateFlow({
+		nodes: [
+			{ id: 'S', label: '起点' },
+			{ id: 'A', label: '主线一步' },
+			{ id: 'X', label: '旁路一步' },
+			{ id: 'B', label: '主线二步' },
+			{ id: 'C', label: '两条路汇合' },
+		],
+		edges: [
+			{ from: 'S', to: 'A', when: '走主线' },
+			{ from: 'S', to: 'X', when: '走旁路' },
+			{ from: 'A', to: 'B' },
+			{ from: 'B', to: 'C' },
+			{ from: 'X', to: 'C' },
+		],
+	});
+	assert.equal(outcome.ok, true, JSON.stringify(outcome.errors));
+	const svg = renderFlowSvg(outcome.flow, '长跨度连线');
+	const boxes = [...svg.matchAll(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)" rx="9"/g)]
+		.map((match) => ({
+			left: Number(match[1]),
+			top: Number(match[2]),
+			right: Number(match[1]) + Number(match[3]),
+			bottom: Number(match[2]) + Number(match[4]),
+		}));
+	const rightmost = Math.max(...boxes.map((box) => box.right));
+	// The arrow-head marker is a path too; the edges are the ones on a line.
+	const paths = [...svg.matchAll(/<path d="(M [^"]+)"/g)].map((match) => match[1]);
+	const skip = paths.find((path) => path.split(' L ').length > 4);
+	assert.ok(skip !== undefined, JSON.stringify(paths));
+	// It leaves the diagram to one side instead of cutting across it.
+	const points = [...skip.matchAll(/(?:M|L) ([\d.]+) ([\d.]+)/g)].map((match) => ({ x: Number(match[1]), y: Number(match[2]) }));
+	assert.ok(points.some((point) => point.x > rightmost), `${JSON.stringify(points)} 全部在 ${rightmost} 之内`);
+	// No leg of the route may pass through a box. A segment is inside one when
+	// its bounding box overlaps the box interior on both axes.
+	for (let index = 1; index < points.length; index += 1) {
+		const a = points[index - 1];
+		const b = points[index];
+		const hit = boxes.find((box) => Math.max(a.x, b.x) > box.left + 1 && Math.min(a.x, b.x) < box.right - 1
+			&& Math.max(a.y, b.y) > box.top + 1 && Math.min(a.y, b.y) < box.bottom - 1);
+		assert.equal(hit, undefined, `第 ${index} 段穿过框 ${JSON.stringify(hit)}`);
+	}
+	// An adjacent-row drift still uses the smooth curve.
+	assert.ok(paths.some((path) => path.includes('C')), JSON.stringify(paths));
+});
+
+check('a loop is drawn as a route around the boxes', () => {
+	// The retry is the whole point of allowing a loop: the picture has to show
+	// that the step repeats, and the route must not cut through the boxes in
+	// between.
+	const outcome = validateFlow({
+		nodes: [
+			{ id: 'submit', label: '模型提交两份产物' },
+			{ id: 'check', label: '插件校验' },
+			{ id: 'err', label: '报错点名字段' },
+			{ id: 'dialog', label: '弹确认框' },
+		],
+		edges: [
+			{ from: 'submit', to: 'check' },
+			{ from: 'check', to: 'err', when: '不通过' },
+			{ from: 'check', to: 'dialog', when: '通过' },
+			{ from: 'err', to: 'check' },
+		],
+	});
+	assert.equal(outcome.ok, true, outcome.ok ? '' : outcome.errors.join('；'));
+	const svg = renderFlowSvg(outcome.flow, '回边');
+	const boxes = [...svg.matchAll(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)" rx="9"/g)]
+		.map((match) => ({
+			left: Number(match[1]),
+			top: Number(match[2]),
+			right: Number(match[1]) + Number(match[3]),
+			bottom: Number(match[2]) + Number(match[4]),
+		}));
+	const paths = [...svg.matchAll(/<path d="(M [^"]+)"/g)].map((match) => match[1]);
+	// The loop is the only route with more than one bend.
+	const loop = paths.find((path) => path.split(' L ').length > 4);
+	assert.ok(loop !== undefined, JSON.stringify(paths));
+	const points = [...loop.matchAll(/(?:M|L) ([\d.]+) ([\d.]+)/g)].map((match) => ({ x: Number(match[1]), y: Number(match[2]) }));
+	for (let index = 1; index < points.length; index += 1) {
+		const a = points[index - 1];
+		const b = points[index];
+		const hit = boxes.find((box) => Math.max(a.x, b.x) > box.left + 1 && Math.min(a.x, b.x) < box.right - 1
+			&& Math.max(a.y, b.y) > box.top + 1 && Math.min(a.y, b.y) < box.bottom - 1);
+		assert.equal(hit, undefined, `第 ${index} 段穿过框`);
+	}
+	// It leaves the diagram on the right, which is what keeps it clear of the
+	// downward arrows.
+	const rightmost = Math.max(...boxes.map((box) => box.right));
+	assert.ok(points.some((point) => point.x > rightmost), JSON.stringify(points));
+});
+
+check('a retry onto the first row is drawn below the title', () => {
+	// Every other retry comes in through the gap above its target row. The first
+	// row has no gap above it, so without a reserved band the return run would be
+	// drawn straight across the chart's title.
+	const outcome = validateFlow({
+		nodes: [
+			{ id: 'open', label: '用户打开设置页' },
+			{ id: 'save', label: '保存后回读校验' },
+			{ id: 'bad', label: '提示哪一项不合法' },
+			{ id: 'ok', label: '提示已保存' },
+		],
+		edges: [
+			{ from: 'open', to: 'save' },
+			{ from: 'save', to: 'bad', when: '校验不通过' },
+			{ from: 'save', to: 'ok', when: '校验通过' },
+			{ from: 'bad', to: 'open' },
+		],
+	});
+	assert.equal(outcome.ok, true, outcome.ok ? '' : outcome.errors.join('；'));
+	const title = '设置页保存与回读校验的完整流程说明，这一行故意写得非常长填满整个标题带';
+	const svg = renderFlowSvg(outcome.flow, title);
+	const baseline = Number(/<text x="28" y="(\d+)"[^>]*font-size="16"/.exec(svg)[1]);
+	// The route's return run comes in over the first row's top edge.
+	const topRowTop = Math.min(...[...svg.matchAll(/<rect x="[\d.]+" y="([\d.]+)" width="[\d.]+" height="[\d.]+" rx="9"/g)]
+		.map((match) => Number(match[1])));
+	const routes = [...svg.matchAll(/<path d="(M [^"]+)" fill="none"/g)].map((match) => match[1]);
+	const loop = routes.find((path) => path.split(' L ').length > 4);
+	assert.ok(loop !== undefined, JSON.stringify(routes));
+	const ys = [...loop.matchAll(/(?:M|L) [\d.]+ ([\d.]+)/g)].map((match) => Number(match[1]));
+	// Nothing above the first row may be drawn over the title's text band.
+	const highest = Math.min(...ys);
+	assert.ok(highest > baseline + 6, `回箭头最上面在 y=${highest}，标题基线在 ${baseline}`);
+	assert.ok(highest < topRowTop, `回箭头最上面在 y=${highest}，第一行顶边在 ${topRowTop}`);
+});
+
+check('conditions on one branch do not overlap each other', () => {
+	// All three edges share the gap under the branching box, so the notes have
+	// only that gap's height and the picture's width to separate in.
+	const outcome = validateFlow({
+		nodes: [
+			{ id: 'S', label: '用户点保存' },
+			{ id: 'L', label: '先落本地' },
+			{ id: 'R', label: '先传服务端' },
+			{ id: 'E', label: '提示失败' },
+		],
+		edges: [
+			{ from: 'S', to: 'L', when: '用户选了只存本地这一项' },
+			{ from: 'S', to: 'R', when: '用户选了上传服务端这一项' },
+			{ from: 'S', to: 'E', when: '网络正断着' },
+			{ from: 'L', to: 'E' },
+			{ from: 'R', to: 'E' },
+		],
+	});
+	assert.equal(outcome.ok, true, JSON.stringify(outcome.errors));
+	const svg = renderFlowSvg(outcome.flow, '并列条件');
+	const pills = [...svg.matchAll(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="18" rx="4"/g)]
+		.map((match) => ({
+			left: Number(match[1]),
+			top: Number(match[2]),
+			right: Number(match[1]) + Number(match[3]),
+			bottom: Number(match[2]) + 18,
+		}));
+	assert.equal(pills.length, 3);
+	for (let i = 0; i < pills.length; i += 1) {
+		for (let j = i + 1; j < pills.length; j += 1) {
+			const a = pills[i];
+			const b = pills[j];
+			const overlap = Math.min(a.right, b.right) > Math.max(a.left, b.left)
+				&& Math.min(a.bottom, b.bottom) > Math.max(a.top, b.top);
+			assert.equal(overlap, false, `标签 ${i} 与 ${j} 重叠：${JSON.stringify([a, b])}`);
+		}
+	}
+	// And they all stay inside the picture.
+	const width = Number(/<svg[^>]*width="(\d+)"/.exec(svg)[1]);
+	for (const pill of pills) assert.ok(pill.left >= 0 && pill.right <= width, JSON.stringify(pill));
+});
+
+check('a condition note sits on its own line, not on a sibling branch', () => {
+	// Every edge leaving one box starts at the same pixel, so a note placed at
+	// the midpoint of its gap can land on the line of a sibling branch; the
+	// reader then attaches the condition to the wrong arrow.
+	const outcome = validateFlow({
+		nodes: [
+			{ id: 'S', label: '用户点保存' },
+			{ id: 'L', label: '先落本地' },
+			{ id: 'R', label: '先传服务端' },
+			{ id: 'E', label: '提示失败' },
+		],
+		edges: [
+			{ from: 'S', to: 'L', when: '只存本地' },
+			{ from: 'S', to: 'R', when: '传服务端' },
+			{ from: 'S', to: 'E', when: '网络断着' },
+			{ from: 'L', to: 'E' },
+			{ from: 'R', to: 'E' },
+		],
+	});
+	assert.equal(outcome.ok, true, JSON.stringify(outcome.errors));
+	const svg = renderFlowSvg(outcome.flow, '标签不压线');
+
+	// Paths are emitted one per edge, in edge order; notes in the same order,
+	// skipping the edges that carry none.
+	const paths = [...svg.matchAll(/<path d="(M [^"]+)" fill="none"/g)].map((match) => sampleSvgPath(match[1]));
+	const notes = [...svg.matchAll(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="18" rx="4"/g)]
+		.map((match) => ({
+			left: Number(match[1]),
+			top: Number(match[2]),
+			right: Number(match[1]) + Number(match[3]),
+			bottom: Number(match[2]) + 18,
+		}));
+	const owners = outcome.flow.edges.map((edge, index) => ({ edge, index })).filter(({ edge }) => edge.when !== undefined);
+	assert.equal(notes.length, owners.length);
+	assert.equal(paths.length, outcome.flow.edges.length);
+
+	notes.forEach((note, noteIndex) => {
+		const owner = owners[noteIndex].index;
+		paths.forEach((samples, edgeIndex) => {
+			if (edgeIndex === owner) return;
+			const hit = samples.some(([x, y]) => x > note.left + 2 && x < note.right - 2 && y > note.top + 2 && y < note.bottom - 2);
+			assert.equal(hit, false, `「${outcome.flow.edges[owner].when}」标签压在 ${outcome.flow.edges[edgeIndex].from}->${outcome.flow.edges[edgeIndex].to} 上`);
+		});
+	});
+});
+
+check('a long label wraps instead of overflowing its box', () => {
+	const lines = wrapLabel('模型调用 spec_resolve 把两份产物的结构化内容一起提交上来，先过参数 schema 再过内容校验');
+	assert.ok(lines.length > 1, JSON.stringify(lines));
+	for (const line of lines) assert.ok(line.length <= 60, line);
+	// A lone trailing character is pulled back rather than left orphaned.
+	assert.ok(lines.every((line) => line.length > 1));
+	assert.deepEqual(wrapLabel('短'), ['短']);
+});
+
+check('a flow rejects bad ids, duplicates and dangling edges', () => {
+	const badId = validateFlow({ nodes: [{ id: '1n', label: 'x' }, { id: 'N2', label: 'y' }], edges: [] });
+	assert.equal(badId.ok, false);
+	assert.ok(badId.errors.some((error) => error.includes('flow.nodes[0].id')));
+
+	const duplicate = validateFlow({ nodes: [{ id: 'N1', label: 'x' }, { id: 'N1', label: 'y' }], edges: [] });
+	assert.equal(duplicate.ok, false);
+	assert.ok(duplicate.errors.some((error) => error.includes('重复的节点 id')));
+
+	const dangling = validateFlow({ nodes: [{ id: 'N1', label: 'x' }, { id: 'N2', label: 'y' }], edges: [{ from: 'N1', to: 'N9' }] });
+	assert.equal(dangling.ok, false);
+	assert.ok(dangling.errors.some((error) => error.includes('flow.edges[0].to')));
+});
+
+check('a flow accepts a retry loop and still rejects a self-loop', () => {
+	// A retry is a loop and has to stay one: unrolling it makes the picture claim
+	// the procedure runs it once.
+	const retry = validateFlow({
+		nodes: [
+			{ id: 'submit', label: '模型提交两份产物' },
+			{ id: 'check', label: '插件校验' },
+			{ id: 'err', label: '报错点名字段' },
+			{ id: 'done', label: '弹确认框' },
+		],
+		edges: [
+			{ from: 'submit', to: 'check' },
+			{ from: 'check', to: 'err', when: '不通过' },
+			{ from: 'check', to: 'done', when: '通过' },
+			{ from: 'err', to: 'submit' },
+		],
+	});
+	assert.equal(retry.ok, true, retry.ok ? '' : retry.errors.join('；'));
+
+	const selfLoop = validateFlow({ nodes: [{ id: 'N1', label: 'x' }, { id: 'N2', label: 'y' }], edges: [{ from: 'N1', to: 'N1' }, { from: 'N1', to: 'N2' }] });
+	assert.equal(selfLoop.ok, false);
+	assert.ok(selfLoop.errors.some((error) => error.includes('连向自己')));
+});
+
+check('a loop edge is recognized and kept out of the layering', () => {
+	const flow = {
+		nodes: [{ id: 'a' }, { id: 'b' }, { id: 'c' }],
+		edges: [{ from: 'a', to: 'b' }, { from: 'b', to: 'c' }, { from: 'c', to: 'b' }],
+	};
+	const back = backEdgesOf(flow);
+	assert.deepEqual([...back], ['c->b']);
+	const layers = layersOf(flow);
+	assert.equal(layers.get('a'), 0);
+	assert.equal(layers.get('b'), 1);
+	assert.equal(layers.get('c'), 2);
+});
+
+check('a flow that is only nodes is not a flow', () => {
+	const outcome = validateFlow({ nodes: [{ id: 'N1', label: 'x' }, { id: 'N2', label: 'y' }], edges: [] });
+	assert.equal(outcome.ok, false);
+	assert.ok(outcome.errors[0].includes('flow.edges'), outcome.errors[0]);
+});
+
+check('a flow rejects a single node and code in a label', () => {
+	assert.equal(validateFlow({ nodes: [{ id: 'N1', label: 'x' }], edges: [] }).ok, false);
+	const coded = validateFlow({
+		nodes: [{ id: 'N1', label: '调用 `run()` 之后' }, { id: 'N2', label: '结束' }],
+		edges: [{ from: 'N1', to: 'N2' }],
+	});
+	assert.equal(coded.ok, false);
+	assert.ok(coded.errors[0].includes('代码'));
+});
+
+check('a flow rejects reasoning in a label', () => {
+	const outcome = validateFlow({
+		nodes: [{ id: 'N1', label: '因为要导出所以点按钮' }, { id: 'N2', label: '结束' }],
+		edges: [{ from: 'N1', to: 'N2' }],
+	});
+	assert.equal(outcome.ok, false);
+	assert.ok(outcome.errors[0].includes('理由'));
+});
+
+check('a label carrying a line break is rejected rather than silently halved', () => {
+	// One node renders as one `- N1 …` line, so a second line would read back as
+	// nothing and the step would disappear at landing time.
+	const outcome = validateFlow({
+		nodes: [{ id: 'N1', label: '第一行\n第二行' }, { id: 'N2', label: '结束' }],
+		edges: [{ from: 'N1', to: 'N2' }],
+	});
+	assert.equal(outcome.ok, false);
+	assert.ok(outcome.errors[0].includes('一行'), outcome.errors[0]);
+});
+
+check('a hand-written brief that would silently lose content is reported', () => {
+	// A repeated heading replaces the earlier list, and a non-bullet line under a
+	// list section is dropped by the bullet reader. Both would land a file whose
+	// text is not what the writer wrote.
+	const duplicate = '# t\n\n## 目标\n甲。\n\n## 目标\n乙。\n\n## 要做什么\n- a\n\n## 验收\n- b\n';
+	const duplicateOutcome = parseBrief(duplicate);
+	assert.equal(duplicateOutcome.ok, false);
+	assert.ok(duplicateOutcome.errors.some((error) => error.includes('不止一次')), duplicateOutcome.errors.join('；'));
+
+	const prose = '# t\n\n## 目标\ng\n\n## 要做什么\n- a\n没有写列表符号的一条需求\n\n## 验收\n- b\n';
+	const proseOutcome = parseBrief(prose);
+	assert.equal(proseOutcome.ok, false);
+	assert.ok(proseOutcome.errors.some((error) => error.includes('不是一条列表项')), proseOutcome.errors.join('；'));
+});
+
+/* ---- deliverable classification ---- */
 
 check('a deliverable write is classified by its target', () => {
 	assert.equal(specDeliverableWrite('write', { file_path: 'AGENTS.md', content: 'hi' }, false).kind, 'agents');
 	assert.equal(specDeliverableWrite('write', { path: 'docs/AGENTS.md', content: 'hi' }, false).kind, 'agents');
-	assert.equal(specDeliverableWrite('write', { path: 'docs/api.md', content: 'hi' }, false).kind, 'doc');
-	assert.equal(specDeliverableWrite('write', { file_path: 'docs/api/auth.md', content: 'hi' }, false).kind, 'doc');
-	assert.equal(specDeliverableWrite('write', { file_path: 'docs/spec-draft.md', content: 'x' }, false).base, 'spec-draft.md');
+	assert.equal(specDeliverableWrite('write', { path: '.spec/brief.md', content: 'hi' }, false).kind, 'brief');
+	assert.equal(specDeliverableWrite('write', { file_path: '.spec/flow.md', content: 'hi' }, false), undefined, '流程图是插件自己画的图，不是模型写的文件');
+	assert.equal(specDeliverableWrite('write', { file_path: 'a/.spec/brief.md', content: 'hi' }, false).kind, 'brief');
+	assert.equal(specDeliverableWrite('write', { file_path: '.spec/draft.md', content: 'x' }, false), undefined);
+	assert.equal(specDeliverableWrite('write', { file_path: 'docs/api.md', content: 'hi' }, false), undefined);
 	assert.equal(specDeliverableWrite('write', { file_path: 'README.md', content: 'hi' }, false), undefined);
-	assert.equal(specDeliverableWrite('write', { file_path: 'src/docs.txt', content: 'hi' }, false), undefined);
-	assert.equal(specDeliverableWrite('edit', { file_path: 'docs/api.md' }, false), undefined);
-	assert.equal(specDeliverableWrite('write', { file_path: 'docs/api.md', content: 'x' }, true), undefined);
+	assert.equal(specDeliverableWrite('edit', { file_path: '.spec/brief.md' }, false), undefined);
+	assert.equal(specDeliverableWrite('write', { file_path: '.spec/brief.md', content: 'x' }, true), undefined);
+});
+
+/* ---- AGENTS.md ---- */
+
+check('the line budget fires only above the limit', () => {
+	assert.deepEqual(agentsMdAdvisories('a\nb\nc'), []);
+	assert.equal(agentsMdAdvisories(Array.from({ length: 201 }, () => 'x').join('\n')).length, 1);
 });
 
 check('progress content is reported only on labelled structural lines', () => {
@@ -218,244 +835,12 @@ check('progress content is reported only on labelled structural lines', () => {
 	// The rule that forbids progress content is not progress content.
 	assert.equal(reports('- AGENTS.md 只放文档索引与规范规则，不写进度类内容。\n'), false);
 	assert.equal(reports('- 落盘的规范文件里不写现状、待办与里程碑。\n'), false);
-	// A docs/ deliverable may record status; only the baseline may not.
-	assert.deepEqual(deliverableAdvisories('doc', '## 现状\n\n已装入。\n'), []);
 	assert.deepEqual(progressAdvisories('   '), []);
 });
 
-check('a code block is reported unless it is a step the reader performs', () => {
-	const reports = (text) => reproductionAdvisories(text).length > 0;
-	// Code as a step, with the three parts: where it goes, what to run, what success looks like.
-	const explained =
-		'# 标题\n\n把下面这段存成仓库根目录的检查脚本，然后执行 node check.mjs，'
-		+ '输出三行 ok 就是通过。\n\n```js\nconst a = 1;\n```\n';
-	assert.equal(reports(explained), false);
-	// A bare code block explains implementation instead of saying it in words.
-	assert.equal(reports('# 标题\n\n```js\nconst a = 1;\n```\n'), true);
-	assert.equal(reports('# 标题\n\n状态折叠那一步返回同一个对象。\n\n```ts\nexport function fold(state) { return state; }\n```\n'), true);
-	// A command block is already a step the reader performs.
-	assert.equal(reports('# 标题\n\n```\nnode selftest.mjs\n```\n'), false);
-	// So is a picture block: a picture is not code, so nothing is required of it.
-	assert.equal(reports('# 标题\n\n```mermaid\nflowchart LR\n  A --> B\n```\n'), false);
-	assert.equal(reports('# 标题\n\n```\n┌───┐\n│ A │\n└───┘\n```\n'), false);
-	assert.deepEqual(reproductionAdvisories('   '), []);
-});
-
-check('the decision-rationale warning fires only on labelled rejections', () => {
-	assert.equal(decisionRationaleAdvisories('# 决策\n\n## 日志落盘\n\n选定 JSONL，一行一条事件。\n').length, 0);
-	assert.equal(decisionRationaleAdvisories('## 为什么不选 SQLite\n\n写入放大。\n').length, 1);
-	assert.equal(decisionRationaleAdvisories('- 被否决方案：改用 SQLite。\n').length, 1);
-	assert.equal(decisionRationaleAdvisories('**Alternatives considered**：SQLite.\n').length, 1);
-	// A table row that merely mentions the rejected option is not a dedicated block.
-	assert.equal(decisionRationaleAdvisories('| 被否决方案 | `decisions.md` |\n').length, 0);
-	// The rule that forbids the record is not a record of one.
-	assert.equal(decisionRationaleAdvisories('- 决策只记结论，不写被否决的方案与理由。\n').length, 0);
-});
-
-check('the documentation rule block is required in AGENTS.md', () => {
-	assert.equal(documentationRulesAdvisories('| 文档 | 何时读 |\n').length, 1);
-	const complete =
-		'- 改代码前判断本次改动是否让 docs/ 过时。\n'
-		+ '- AGENTS.md 只放文档索引与规范规则，不写现状、进度、待办这类内容。\n'
-		+ '- 写进 docs/ 的文档只写结论与硬事实，不解释：删掉一句话读者照做也不出错，就删。\n'
-		+ '- 文档信息密度极高：一行一个结论，能进表格就进表格。\n'
-		+ '- 代码能不出就不出，只在读者要照着做时给，并且每段代码都要跟着复现步骤：写进哪个文件、执行什么、看到什么算成功。\n'
-		+ '- 决策只记结论，不写被否决的方案与理由。\n';
-	assert.deepEqual(documentationRulesAdvisories(complete), []);
-	assert.equal(
-		documentationRulesAdvisories('过时了就改；规则文件不写进度；只写结论不解释；信息密度极高；代码要跟着复现步骤；决策只记结论。\n').length,
-		0,
-	);
-	// The wording this standard replaced — a plain-language document — no longer
-	// satisfies the rule block.
-	assert.equal(
-		documentationRulesAdvisories('过时了就改；代码跟着复现步骤不写进度；文档整篇说人话；决策只记结论。\n').length,
-		1,
-	);
-	assert.deepEqual(documentationRulesAdvisories('   '), []);
-});
-
-check('a section that exists to explain itself is reported', () => {
-	const reports = (text) => reasonAdvisories(text).length > 0;
-	assert.equal(reports('# 标题\n\n## 已知限制\n\n- 用 shell 写文件不拦。\n'), false);
-	// The rule that forbids the section is not the section.
-	assert.equal(reports('# 规则\n\n- 文档不写背景、动机与设计考量。\n'), false);
-	assert.equal(reports('# 规则\n\n**不写导读与小结。**\n'), false);
-	assert.equal(reports('## 背景\n\n为什么会有这个插件。\n'), true);
-	assert.equal(reports('# 标题\n\n## 本章小结\n\n正文。\n'), true);
-	assert.equal(reports('### 设计考量\n\n正文。\n'), true);
-	assert.equal(reports('**取舍**\n\n正文。\n'), true);
-	// Prose that merely uses one of the words is not a section.
-	assert.equal(reports('# 标题\n\n这里记录了当时的权衡结果，不改。\n'), false);
-	assert.deepEqual(reasonAdvisories('   '), []);
-});
-
-check('every offending section is named in one message', () => {
-	// Reporting the first finding and returning would hide the rest: a document
-	// with three filler sections is one fix, not three rounds.
-	const [message] = reasonAdvisories('## 背景\n\nx\n\n## 小结\n\ny\n\n## 为什么要这样\n\nz\n');
-	assert.equal(typeof message, 'string');
-	for (const label of ['背景', '小结', '为什么要这样']) assert.ok(message.includes(label), `${label} 未出现在警告里`);
-	// More than three findings collapse to a count, so the message stays readable.
-	const many = Array.from({ length: 5 }, (_, index) => `## 背景与目标${index}\n\nx\n`).join('\n');
-	assert.ok(reasonAdvisories(many)[0].includes('等 5 处'));
-});
-
-check('a filler heading is matched as a whole title, never as a substring', () => {
-	const reports = (text) => reasonAdvisories(text).length > 0;
-	// A compound naming a fact is not the filler word inside it.
-	assert.equal(reports('## 背景色\n\n默认 #fff。\n'), false);
-	assert.equal(reports('## 历史记录\n\n正文。\n'), false);
-	assert.equal(reports('## 总结性数据\n\n正文。\n'), false);
-	assert.equal(reports('## 动机触发器\n\n正文。\n'), false);
-	assert.equal(reports('## 权衡参数\n\n正文。\n'), false);
-	assert.equal(reports('## 取舍规则\n\n正文。\n'), false);
-	// The word joined to a sibling idea still names the filler section.
-	assert.equal(reports('## 背景与目标\n\n正文。\n'), true);
-	// `历史版本` is a change log: the history this rule targets, not a dataset.
-	assert.equal(reports('## 历史版本\n\n| 版本 | 日期 |\n| --- | --- |\n'), true);
-	assert.equal(reports('## 历史\n\n正文。\n'), true);
-	assert.equal(reports('## 技术沿革\n\n正文。\n'), true);
-	// A heading that asks why is the explanation itself.
-	assert.equal(reports('## 为什么用 TypeScript\n\n正文。\n'), true);
-});
-
-check('a superseded value is reported only when the marker bites into it', () => {
-	const reports = (text) => supersededAdvisories(text).length > 0;
-	// Two answers to one question, in a shape that states the pair outright.
-	assert.equal(reports('技术栈：vite（此前为 webpack）。\n'), true);
-	assert.equal(reports('| 构建工具 | vite（原 webpack） |\n| --- | --- |\n'), true);
-	assert.equal(reports('API v1 已弃用。\n'), true);
-	// Deliberately not caught: a pair written as bare prose, with no bracket, no
-	// arrow, no table and no deprecation word — `vite，替代了 webpack`. Telling it
-	// apart from an instruction needs a guess about wording, and the guess cost
-	// more false reports than the catch was worth. The prompt covers this shape.
-	assert.equal(reports('- 构建：vite，替代了 webpack\n'), false);
-	assert.equal(reports('我们从 MySQL 迁移到了 PostgreSQL。\n'), false);
-	// Instructions that happen to use a connective are not migration history.
-	assert.equal(reports('如果校验失败，改为返回错误码 `E_INVALID`。\n'), false);
-	assert.equal(reports('执行 `npm install` 之前，先运行 `npm ci`。\n'), false);
-	assert.equal(reports('调用 `close()` 之前必须先 `flush()`。\n'), false);
-	assert.equal(reports('升级到 Node 22 后，`fetch` 可直接使用。\n'), false);
-	assert.equal(reports('早期返回用 `return null`。\n'), false);
-	// A document that states only the current value says nothing about the past.
-	assert.equal(reports('| 构建工具 | vite |\n| --- | --- |\n'), false);
-	assert.equal(reports('原因如下：先读缓存。\n'), false);
-	assert.deepEqual(supersededAdvisories('   '), []);
-});
-
-check('a bare replacement verb names one value, so it is a step not a history', () => {
-	const reports = (text) => supersededAdvisories(text).length > 0;
-	// One answer only: a step the reader performs. Reporting it would have the
-	// model delete a correct instruction.
-	assert.equal(reports('改用 `pnpm` 安装依赖。\n'), false);
-	assert.equal(reports('把 `timeout` 换成 `5000`。\n'), false);
-	assert.equal(reports('改为调用 `reset()`。\n'), false);
-	assert.equal(reports('部署之前用 `docker build` 构建镜像。\n'), false);
-	// A bracket marks the retired value, so the parenthetical rule catches it.
-	assert.equal(reports('改用 `vite`（此前用 `webpack`）。\n'), true);
-	// Deliberately not caught: `现在改用 SQLite` names one value. The contrast
-	// word alone does not turn a step into a two-answer line.
-	assert.equal(reports('现在改用 SQLite。\n'), false);
-	assert.equal(reports('迁移自 `webpack`。\n'), false);
-});
-
-check('a superseded pair is caught by shape, not only by wording', () => {
-	const reports = (text) => supersededAdvisories(text).length > 0;
-	// A table with an old and a current column states the pair with no marker.
-	assert.equal(reports('| 项 | 旧值 | 当前值 |\n| --- | --- | --- |\n| 构建 | `webpack` | `vite` |\n'), true);
-	// An arrow joins exactly two values: a replacement.
-	assert.equal(reports('- 迁移：`webpack` → `vite`\n'), true);
-	// An arrow chain is a dependency direction, not a replacement.
-	assert.equal(reports('`api` → `core` → `infra`，不反向。\n'), false);
-	// Deliberately not caught: a past-state word separated from its value by an
-	// arbitrary phrase. Guessing how far a marker reaches is what produced the
-	// false reports; these shapes are the prompt's job.
-	assert.equal(reports('之前的实现用的是 `lodash`。\n'), false);
-	assert.equal(reports('## 历史上这个字段叫 `userId`。\n'), false);
-	// A parenthetical states the same thing without a guess.
-	assert.equal(reports('数据库：PostgreSQL（原 MySQL）。\n'), true);
-	// But a trailing clause after the bracket is prose, not a parenthetical pair.
-	assert.equal(reports('原来的默认端口（8080）已改成 9090。\n'), false);
-	// A trailing marker keeps its own ordering.
-	assert.equal(reports('`JQuery` 已被移除。\n'), true);
-	// Weak deprecation words need a value beside them.
-	assert.equal(reports('清除废弃数据前先备份。\n'), false);
-	assert.equal(reports('缓存不再使用时设置 `CACHE=0`。\n'), false);
-	assert.equal(reports('该函数保留原名 `init`。\n'), false);
-});
-
-check('both orderings of a replacement are caught', () => {
-	const reports = (text) => supersededAdvisories(text).length > 0;
-	// The retired value may follow the deprecation word rather than precede it.
-	assert.equal(reports('`JQuery` 已被移除。\n'), true);
-	assert.equal(reports('`webpack` 已被 `vite` 取代。\n'), true);
-	// Prose forms with no bracket, arrow, table or deprecation word stay out.
-	assert.equal(reports('用 `vite` 替换 `webpack`。\n'), false);
-	assert.equal(reports('`webpack` was replaced by `vite`.\n'), false);
-	assert.equal(reports('从 `webpack` 迁移至 `vite`。\n'), false);
-	// `改为使用 vite` names one value only — a step, not a history record.
-	assert.equal(reports('改为使用 `vite`。\n'), false);
-});
-
-check('ordinary words that merely contain a marker stay out', () => {
-	const reports = (text) => supersededAdvisories(text).length > 0;
-	// `原` closes a verb here, it does not open a past state.
-	assert.equal(reports('从备份还原 SQL 数据库。\n'), false);
-	assert.equal(reports('还原SQL。\n'), false);
-	// `旧版` qualifies a browser, not a retired value.
-	assert.equal(reports('旧版浏览器不支持该 API。\n'), false);
-	// A JavaScript arrow is not a replacement arrow.
-	assert.equal(reports('items.map(x=>x.id)\n'), false);
-	assert.equal(reports('const f = x => x + 1\n'), false);
-	// A configuration step names no past state.
-	assert.equal(reports('将 `NODE_ENV` 改为 `production` 再启动。\n'), false);
-	// `此前` opening an instruction is a time word.
-	assert.equal(reports('此前请先运行 `npm ci`。\n'), false);
-});
-
-check('a filler heading keeps its identifier through trailing punctuation', () => {
-	const reports = (text) => reasonAdvisories(text).length > 0;
-	// A trailing colon or parenthetical is heading style, not meaning.
-	assert.equal(reports('## 历史：\n\n正文。\n'), true);
-	assert.equal(reports('## 术语表（缩略语）\n\n正文。\n'), true);
-	assert.equal(reports('**历史：**\n\n正文。\n'), true);
-	// A subject before the word still names the filler section.
-	assert.equal(reports('## 版本历史\n\n正文。\n'), true);
-	assert.equal(reports('## 设计动机\n\n正文。\n'), true);
-	// A word continuing into a concrete noun still names a fact.
-	assert.equal(reports('## 历史数据\n\n正文。\n'), false);
-	assert.equal(reports('## 背景图\n\n正文。\n'), false);
-});
-
-check('a rule statement is exempt however it is worded', () => {
-	// The rule file spells its own rules; each of these forbids the practice
-	// rather than performing it, and none may be reported.
-	const exemptions = [
-		'- 文档不写历史版本，不写「原来用 X，后来改成 Y」。',
-		'- 不写已被取代的值（如 `vite（原 webpack）`）。',
-		'- 文档不出现「此前为 `x`」这类表述。',
-		'- 一律不保留「此前为 `x`」。',
-		'- 不收录旧值。',
-	];
-	for (const line of exemptions) {
-		assert.equal(supersededAdvisories(line).length, 0, line);
-	}
-});
-
-check('one deliverable collects the line budget and every writing check', () => {
-	const long = Array.from({ length: 201 }, () => 'x').join('\n');
-	assert.equal(deliverableAdvisories('agents', long).length, 2);
-	assert.deepEqual(deliverableAdvisories('doc', long), []);
-	// A section named after the rejected alternative trips both the "why" heading
-	// check and the decision-rationale check.
-	assert.equal(deliverableAdvisories('doc', '## 为什么不选 X\n\n正文。\n').length, 2);
-	assert.equal(deliverableAdvisories('doc', '# 标题\n\n```js\nconst a = 1;\n```\n').length, 1);
-	assert.equal(deliverableAdvisories('doc', '## 背景\n\n正文。\n').length, 1);
-	// A baseline carrying progress reports both the missing rule block and the
-	// progress record itself.
-	const withProgress = '## 现状\n\n- 已能启动。\n';
-	assert.equal(deliverableAdvisories('agents', withProgress).length, 2);
+check('one AGENTS.md write collects both its checks', () => {
+	const body = `${Array.from({ length: 201 }, () => 'x').join('\n')}\n\n## 现状\n\n已装入。\n`;
+	assert.equal(deliverableAdvisories('agents', body).length, 2);
 });
 
 console.log(`\n${passed} checks passed`);

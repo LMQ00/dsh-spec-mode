@@ -1,8 +1,12 @@
 {
   "name": "dsh-spec-mode",
-  "version": "1.5.0",
+  "version": "2.1.0",
   "type": "module",
-  "description": "Spec mode for the DeepSeek Harness: interview-driven requirements capture with a read-only working tree.",
+  "scripts": {
+    "test": "node selftest.mjs && node landing-test.mjs",
+    "flow": "node doc-flow.mjs"
+  },
+  "description": "Spec mode for the DeepSeek Harness: interview-driven requirements capture that lands a requirement brief for a later model and a flow-chart image for a person.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -26,12 +30,18 @@
     "guard.js",
     "advisories.js",
     "prompt.js",
+    "brief.js",
+    "flow.js",
+    "flow-svg.js",
+    "rasterize.js",
     "cordis.patch.yml",
     "selftest.mjs",
+    "landing-test.mjs",
+    "doc-flow.mjs",
     "README.md",
     "LICENSE",
-    "docs/*.md",
     "icon.svg",
+    ".spec/flow.png",
     "locale/*.json"
   ],
   "dsh": {

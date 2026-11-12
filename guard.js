@@ -47,8 +47,8 @@ export function isWriteTool(toolName) {
 
 /**
  * Classify one tool-supplied path. `draft` is the draft file and nothing else —
- * the draft lives inside the project's `docs/` directory, so a directory-wide
- * allowance would leak write access to real documentation. Anything
+ * the draft lives inside the project's `.spec/` directory, so a directory-wide
+ * allowance would leak write access to the two products it will become. Anything
  * unresolvable is `working-tree`, so a parse failure fails closed.
  *
  * @param {string} raw - the raw path argument.
