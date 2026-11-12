@@ -1,10 +1,12 @@
 # Bundle patch for dsh-spec-mode.
 #
-# One Host row. It declares no Config: the interview protocol, the `.spec`
-# product paths, and the AGENTS.md advisory budget are code-owned constants in
-# the modules. Everything else it needs (tools, systemPrompt,
-# sessionProjections, commands, userQuestions, planMode) is an injected or
-# opportunistically read Service from the surrounding composition.
+# One Host row plus one Client row. Neither declares Config: the interview
+# protocol, the chart collection layout, and the AGENTS.md advisory budget are
+# code-owned constants in the modules. Everything else it needs (tools,
+# systemPrompt, sessionProjections, commands, userQuestions, planMode, and for
+# the view webServer + connection) is an injected or opportunistically read
+# Service from the surrounding composition — a profile without a web server
+# still gets the interview, it just gets no chart page.
 - insert:
     - id: spec-mode
       name: 'dsh-spec-mode'

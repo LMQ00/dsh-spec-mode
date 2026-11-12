@@ -1,12 +1,12 @@
 {
   "name": "dsh-spec-mode",
-  "version": "2.1.0",
+  "version": "3.0.0",
   "type": "module",
   "scripts": {
     "test": "node selftest.mjs && node landing-test.mjs",
     "flow": "node doc-flow.mjs"
   },
-  "description": "Spec mode for the DeepSeek Harness: interview-driven requirements capture that lands a requirement brief for a later model and a flow-chart image for a person.",
+  "description": "Spec mode for the DeepSeek Harness: interview-driven requirements capture that lands a chart collection under .spec/flows/ — one overview, the module charts it points at, and one requirement brief per chart — plus a conversation view that reads and edits them.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -20,6 +20,7 @@
   ],
   "exports": {
     ".": "./index.js",
+    "./client": "./client.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },
@@ -33,7 +34,10 @@
     "brief.js",
     "flow.js",
     "flow-svg.js",
+    "flows.js",
+    "flows-api.js",
     "rasterize.js",
+    "client.js",
     "cordis.patch.yml",
     "selftest.mjs",
     "landing-test.mjs",
@@ -41,12 +45,21 @@
     "README.md",
     "LICENSE",
     "icon.svg",
-    ".spec/flow.png",
+    ".spec/flows/*.json",
+    ".spec/flows/*.png",
+    ".spec/flows/*.brief.md",
     "locale/*.json"
   ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
     }
   }
 }

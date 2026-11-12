@@ -23,6 +23,7 @@
 
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
@@ -114,7 +115,7 @@ export async function rasterize(svgPath, pngPath, size) {
 				'--force-device-scale-factor=2',
 				`--window-size=${width},${height}`,
 				`--screenshot=${pngPath}`,
-				`file://${svgPath}`,
+				pathToFileURL(svgPath).href,
 			],
 		]);
 	}

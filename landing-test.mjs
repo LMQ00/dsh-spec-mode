@@ -24,8 +24,18 @@ function check(label, fn) {
 
 /* ---- fake Cordis context ---- */
 
-function makeContext(projectDir, { answers = [] } = {}) {
-	const registered = { tools: [], guards: [], sections: [], projections: [], commands: [], listeners: new Map() };
+function makeContext(projectDir, { answers = [], webServer = false } = {}) {
+	const registered = {
+		tools: [],
+		guards: [],
+		sections: [],
+		projections: [],
+		commands: [],
+		listeners: new Map(),
+		effects: [],
+		webServer: webServer ? { routes: [], register: (route) => { registered.webServer.routes.push(route); return () => {}; } } : undefined,
+		connection: webServer ? { requestRejection: () => undefined } : undefined,
+	};
 	const asked = [];
 	const ctx = {
 		sessionProjections: {
@@ -44,9 +54,29 @@ function makeContext(projectDir, { answers = [] } = {}) {
 			register: (definition, options) => registered.tools.push({ definition, options }),
 			guard: (fn) => registered.guards.push(fn),
 		},
-		inject: (_deps, fn) => fn({
-			commands: { register: (definition) => registered.commands.push(definition) },
-		}),
+		// The real context resolves `ctx.inject(deps, cb)` only when every named
+		// service is present. The fake composes the commands surface always, and the
+		// web surface only when a check asks for it — so a profile without a web
+		// server exercises the same code path as the real one.
+		inject: (deps, fn) => {
+			const available = {
+				effect: (...args) => ctx.effect(...args),
+				get: (...args) => ctx.get(...args),
+				on: (...args) => ctx.on(...args),
+				commands: { register: (definition) => registered.commands.push(definition) },
+				webServer: registered.webServer,
+				connection: registered.connection,
+			};
+			if (deps.some((dep) => available[dep] === undefined)) return undefined;
+			return fn(available);
+		},
+		effect: (fn) => {
+			const disposer = fn();
+			registered.effects.push(disposer);
+			return () => {
+				if (typeof disposer === 'function') disposer();
+			};
+		},
 		get: (name) => {
 			if (name === 'userQuestions') {
 				return {
@@ -75,21 +105,23 @@ function makeContext(projectDir, { answers = [] } = {}) {
 const session = (cwd) => ({ header: { cwd }, append() {} });
 
 const goodArgs = (title) => ({
-	brief: {
-		title: `记 <${title}> 的需求`,
-		goal: '用户在列表页能导出当前筛选结果为 CSV。',
-		requirements: ['列表页右上角有「导出」按钮。', '导出范围是当前筛选结果。'],
-		acceptance: ['1000 条导出后文件 1001 行（含表头）。'],
-		constraints: ['只做 CSV。'],
-	},
-	flow: {
-		nodes: [
-			{ id: 'N1', label: '用户点击导出按钮' },
-			{ id: 'N2', label: '页面按当前筛选读取账单' },
-			{ id: 'N3', label: '浏览器开始下载 CSV 文件' },
-		],
-		edges: [{ from: 'N1', to: 'N2' }, { from: 'N2', to: 'N3' }],
-	},
+	charts: [
+		{
+			id: 'overview',
+			kind: 'overview',
+			name: `记 <${title}> 的需求`,
+			scope: '从用户点导出到最后拿到 CSV',
+			nodes: [
+				{ id: 'N1', label: '用户点击导出按钮' },
+				{ id: 'N2', label: '页面按当前筛选读取账单' },
+				{ id: 'N3', label: '浏览器开始下载 CSV 文件' },
+			],
+			edges: [{ from: 'N1', to: 'N2' }, { from: 'N2', to: 'N3' }],
+			brief: '# 记导出的需求\n\n## 目标\n用户在列表页能导出当前筛选结果为 CSV。\n\n'
+				+ '## 要做什么\n- 列表页右上角有「导出」按钮。\n- 导出范围是当前筛选结果。\n\n'
+				+ '## 验收\n- 1000 条导出后文件 1001 行（含表头）。\n\n## 约束\n- 只做 CSV。\n',
+		},
+	],
 });
 
 const approve = { answers: [{ id: 'spec-review', selected: ['退出并落盘'] }] };
@@ -101,7 +133,7 @@ mkdirSync(join(project, '.git'), { recursive: true });
 
 /* ---- registration ---- */
 
-check('apply registers the projection, the section, the command, the tool and the guard', () => {
+check('apply registers the projection, the section, the command, the tools and the guard', () => {
 	const ctx = makeContext(project);
 	const r = ctx._registered;
 	assert.equal(r.projections.length, 1);
@@ -111,11 +143,25 @@ check('apply registers the projection, the section, the command, the tool and th
 	assert.equal(r.sections[0].name, 'spec:policy');
 	assert.equal(r.commands.length, 1);
 	assert.equal(r.commands[0].name, 'spec');
-	assert.equal(r.tools.length, 1);
-	assert.equal(r.tools[0].definition.name, 'spec_resolve');
+	assert.deepEqual(r.tools.map((tool) => tool.definition.name), ['spec_resolve', 'flow_read', 'flow_write']);
 	assert.equal(r.guards.length, 1);
 	assert.ok(r.listeners.has('tools/post-execute'));
 	assert.ok(r.listeners.has('agent/created'));
+});
+
+check('a composition without a web server still activates, with no routes registered', () => {
+	const ctx = makeContext(project);
+	assert.equal(ctx._registered.effects.length, 0, '没有 webServer 时不注册路由');
+	assert.equal(ctx._registered.tools.length, 3);
+});
+
+check('the collection routes are mounted when the composition has a web server', () => {
+	const ctx = makeContext(project, { webServer: true });
+	assert.equal(ctx._registered.effects.length, 1);
+	const routes = ctx._registered.webServer.routes;
+	assert.equal(routes.length, 1);
+	assert.equal(routes[0].path, '/spec/flows');
+	assert.equal(routes[0].kind, 'prefix');
 });
 
 check('the prompt section is empty while the mode is off and non-empty while it is on', () => {
@@ -150,8 +196,7 @@ check('a rejection keeps the mode and writes nothing', async () => {
 	}
 	assert.ok(threw !== undefined, '驳回必须抛错');
 	assert.ok(threw.message.includes('保持开启'));
-	assert.equal(existsSync(join(dir, '.spec', 'brief.md')), false);
-	assert.equal(existsSync(join(dir, '.spec', 'flow.md')), false);
+	assert.equal(existsSync(join(dir, '.spec', 'flows')), false, '驳回时连目录都不该建');
 });
 
 check('a validation failure throws before the review box opens', async () => {
@@ -162,7 +207,7 @@ check('a validation failure throws before the review box opens', async () => {
 	const tool = ctx._registered.tools[0].definition;
 	const agent = { session: session(dir) };
 	const broken = goodArgs('invalid');
-	broken.brief.requirements = ['先做导出，因为用户要求。'];
+	broken.charts[0].brief = '# 记导出的需求\n\n## 目标\n能够导出。\n\n## 要做什么\n- 先做导出，因为用户要求。\n\n## 验收\n- 能下载。\n';
 	let threw;
 	try {
 		await tool.execute(broken, { agent, signal: undefined });
@@ -170,8 +215,8 @@ check('a validation failure throws before the review box opens', async () => {
 		threw = error;
 	}
 	assert.ok(threw !== undefined);
-	assert.ok(threw.message.includes('brief.requirements[0]'));
-	assert.ok(threw.message.includes('理由'));
+	assert.ok(threw.message.includes('brief.requirements[0]'), threw.message);
+	assert.ok(threw.message.includes('理由'), threw.message);
 	assert.equal(ctx._asked.length, 0, '校验不过时不得弹框');
 });
 
@@ -187,24 +232,25 @@ check('an approval writes the brief and a chart image, deletes the draft', async
 	const value = await tool.execute(goodArgs('approve'), { agent, signal: undefined });
 
 	assert.equal(value.exited, true);
-	assert.equal(value.briefPath, join(dir, '.spec', 'brief.md'));
-	// Either format is a legitimate landing: a machine with no rasterizer keeps
-	// the SVG, and the preview shows it just the same.
-	assert.ok(
-		value.flowPath === join(dir, '.spec', 'flow.png') || value.flowPath === join(dir, '.spec', 'flow.svg'),
-		value.flowPath,
-	);
+	assert.equal(value.charts.length, 1);
+	const landed = value.charts[0];
+	assert.equal(landed.id, 'overview');
+	assert.equal(landed.model, join(dir, '.spec', 'flows', 'overview.json'));
 
-	const brief = readFileSync(value.briefPath, 'utf8');
-	assert.ok(brief.startsWith('# 记 <approve> 的需求\n'));
+	const model = readFileSync(landed.model, 'utf8');
+	assert.ok(model.includes('"kind": "overview"'));
+
+	const brief = readFileSync(join(dir, '.spec', 'flows', 'overview.brief.md'), 'utf8');
+	assert.ok(brief.startsWith('# 记导出的需求\n'));
 	assert.ok(brief.includes('## 目标'));
 	assert.ok(brief.includes('## 要做什么'));
 	assert.ok(brief.includes('## 验收'));
 	assert.ok(brief.includes('## 约束'));
 
 	// The chart is a picture: PNG bytes, or SVG source when no renderer exists.
-	const chart = readFileSync(value.flowPath);
-	if (value.flowPath.endsWith('.png')) {
+	const picturePath = join(dir, '.spec', 'flows', existsSync(join(dir, '.spec', 'flows', 'overview.png')) ? 'overview.png' : 'overview.svg');
+	const chart = readFileSync(picturePath);
+	if (picturePath.endsWith('.png')) {
 		assert.equal(chart.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', 'PNG 头');
 		assert.ok(chart.length > 1000, `图片太小：${chart.length}`);
 	} else {
@@ -215,8 +261,7 @@ check('an approval writes the brief and a chart image, deletes the draft', async
 
 	assert.equal(existsSync(join(dir, '.spec', 'draft.md')), false, '草稿必须被删掉');
 	assert.equal(ctx._asked.length, 1, '批准前弹过一次框');
-	assert.ok(ctx._asked[0].questions[0].detail.includes('== 需求简报'));
-	assert.ok(ctx._asked[0].questions[0].detail.includes('== 功能流程图'));
+	assert.ok(ctx._asked[0].questions[0].detail.includes('记 <approve> 的需求'));
 	assert.ok(ctx._asked[0].questions[0].detail.includes('用户点击导出按钮'), '确认框要列出图上那些框');
 });
 
@@ -228,7 +273,7 @@ check('a missing draft is not a landing failure', async () => {
 	const tool = ctx._registered.tools[0].definition;
 	const value = await tool.execute(goodArgs('nodraft'), { agent: { session: session(dir) }, signal: undefined });
 	assert.equal(value.exited, true);
-	assert.ok(existsSync(value.briefPath));
+	assert.ok(existsSync(value.charts[0].model));
 });
 
 check('calling the tool outside the mode throws', async () => {
@@ -294,7 +339,10 @@ check('the guard only lets the draft through while the mode is on', () => {
 
 /* ---- advisories ---- */
 
-check('a product write during a landing is reported, and one outside it is not', async () => {
+check('only AGENTS.md earns a write-time advisory now', async () => {
+	// A chart's brief is written by the plugin's own tools, which validate it, and
+	// a person editing one by hand is not held to the four-section shape — so the
+	// write path has nothing to say about it, in the mode or out of it.
 	const dir = join(sandbox, 'advisory');
 	mkdirSync(join(dir, '.git'), { recursive: true });
 	const ctx = makeContext(dir);
@@ -303,30 +351,22 @@ check('a product write during a landing is reported, and one outside it is not',
 	const next = async () => ({ kind: 'accept' });
 	const badBrief = '# t\n\n## 目标\ngoal\n\n## 要做什么\n- a\n\n## 验收\n';
 
-	ctx._state = { active: false, running: null, exitCall: null };
-	const outside = await listener(
-		{ name: 'write', arguments: { file_path: join(dir, '.spec', 'brief.md'), content: badBrief }, agent },
-		{ isError: false },
-		next,
-	);
-	assert.equal(outside.additionalContexts, undefined, '不在 spec 工作期间不提醒');
-
 	ctx._state = { active: true, running: null, exitCall: null };
-	const inside = await listener(
-		{ name: 'write', arguments: { file_path: join(dir, '.spec', 'brief.md'), content: badBrief }, agent },
-		{ isError: false },
-		next,
-	);
-	assert.equal(inside.additionalContexts.length, 1);
-	assert.ok(inside.additionalContexts[0].content[0].text.includes('brief.md 不合格'));
-	assert.ok(inside.additionalContexts[0].source.summary.includes('简报检查'));
+	for (const target of ['.spec/brief.md', '.spec/flows/overview.brief.md', '.spec/draft.md']) {
+		const decision = await listener(
+			{ name: 'write', arguments: { file_path: join(dir, target), content: badBrief }, agent },
+			{ isError: false },
+			next,
+		);
+		assert.equal(decision.additionalContexts, undefined, `${target} 不该被检查`);
+	}
 
-	const draftWrite = await listener(
-		{ name: 'write', arguments: { file_path: join(dir, '.spec', 'draft.md'), content: badBrief }, agent },
+	const agents = await listener(
+		{ name: 'write', arguments: { file_path: join(dir, 'AGENTS.md'), content: badBrief }, agent },
 		{ isError: false },
 		next,
 	);
-	assert.equal(draftWrite.additionalContexts, undefined, '草稿不检查');
+	assert.equal(agents.additionalContexts, undefined, '合格的 AGENTS.md 不提醒');
 });
 
 check('the AGENTS.md line budget reports outside the mode too', async () => {

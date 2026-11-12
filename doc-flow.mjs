@@ -1,91 +1,168 @@
-/**
- * Regenerates this repository's own flow chart — `.spec/flow.png`, the picture
- * the README shows.
- *
- * The chart is not hand-drawn: it is what the plugin itself produces, run
- * through the same three steps a landing takes (`validateFlow` → `renderFlowSvg`
- * → `rasterize`), so the picture in the README cannot drift from the behaviour
- * the code has. The nodes below restate the protocol in `prompt.js`; changing
- * the protocol means changing these nodes and running `npm run flow`.
- *
- * @module dsh-spec-mode/doc-flow
- */
+// Generates this repository's own chart collection into .spec/flows/.
+//
+// The charts live in code rather than in the landed JSON for one reason: this
+// repository is the plugin's own first user, so its charts have to be
+// regenerable after every change without re-running an interview.
+//
+// Run: npm run flow
 
-import { unlinkSync, writeFileSync } from 'node:fs';
-import { relative } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 
-import { validateFlow } from './flow.js';
+import { validateChart, validateCollection, writeChartModel } from './flows.js';
 import { renderFlowSvg } from './flow-svg.js';
+import { drawableChart } from './flows.js';
 import { rasterize, svgSize } from './rasterize.js';
-import { ensureSpecDir, resolveFlowImagePath, resolveFlowVectorPath, resolveSpecDir } from './state.js';
+import { resolveFlowsDir, resolveSpecDir } from './state.js';
 
-/** Drawn above the boxes; it is the one line a reader sees before the graph. */
-export const TITLE = '一次 spec 访谈的流程';
+/** Where the run writes, regardless of where npm invoked it from. */
+const ROOT = new URL('.', import.meta.url).pathname;
 
-/**
- * Two loops, both drawn as back arrows: the interview repeats until the user
- * says the requirements are complete, and a rejected submission repeats until
- * the two products pass validation. Unrolling either would tell the reader it
- * happens once.
- */
-const chart = {
+/** The overview: the whole product, with every step below summarised as a module. */
+export const overview = {
+	id: 'overview',
+	kind: 'overview',
+	name: '一次 spec 访谈',
+	scope: '从用户说出这次要做什么，到 .spec/flows/ 里出现新的图集',
 	nodes: [
-		{ id: 'n1', label: '用户输入 /spec，模式打开，工作树变只读' },
-		{ id: 'n2', label: '模型每轮把新需求写进草稿' },
-		{ id: 'n3', label: '模型用自己的话复述，用户确认或纠正' },
-		{ id: 'n4', label: '用户确认访谈结束，模型提交简报与流程图' },
-		{ id: 'n5', label: '插件先校验这两份产物' },
-		{ id: 'n6', label: '报错点名字段，模型改完再提交一次' },
-		{ id: 'n7', label: '弹确认框，正文是简报全文与图上那些框' },
-		{ id: 'n8', label: '模式保持不变，这次到此为止，等用户说话' },
-		{ id: 'n9', label: '插件写 brief.md、画出 flow.png，删掉草稿' },
-		{ id: 'n10', label: '模式退出，工作树恢复可写' },
-		{ id: 'n11', label: '模型更新 AGENTS.md' },
+		{ id: 'n1', label: '用户输入 /spec，说清这次要做什么' },
+		{ id: 'n2', label: '模型逐轮访谈，每轮把结论写进草稿' },
+		{ id: 'n3', label: '用户确认访谈结束，模型提交图集' },
+		{ id: 'n4', module: 'check', ports: ['入：本次提交的图与各自的简报', '出：校验通过或点名报错'] },
+		{ id: 'n5', module: 'land', ports: ['入：校验通过的图集', '出：.spec/flows/ 下三件套齐了'] },
+		{ id: 'n6', module: 'view', ports: ['入：.spec/flows/ 里有图集', '出：改好的图与简报回到盘上'] },
+		{ id: 'n7', label: '模型更新 AGENTS.md 的文档索引' },
 	],
 	edges: [
 		{ from: 'n1', to: 'n2' },
 		{ from: 'n2', to: 'n3' },
-		{ from: 'n3', to: 'n2', when: '还有要补的需求' },
-		{ from: 'n3', to: 'n4', when: '用户确认结束' },
+		{ from: 'n3', to: 'n4' },
 		{ from: 'n4', to: 'n5' },
-		{ from: 'n5', to: 'n6', when: '校验不通过' },
-		{ from: 'n6', to: 'n5' },
-		{ from: 'n5', to: 'n7', when: '校验通过' },
-		{ from: 'n7', to: 'n8', when: '继续访谈或关掉确认框' },
-		{ from: 'n7', to: 'n9', when: '退出并落盘' },
-		{ from: 'n9', to: 'n10' },
-		{ from: 'n10', to: 'n11' },
+		{ from: 'n5', to: 'n6' },
+		{ from: 'n6', to: 'n7' },
 	],
 };
 
-/** The chart as the plugin would validate it; throws only if this file is edited into an invalid graph. */
-export const repoFlow = (() => {
-	const outcome = validateFlow(chart);
-	if (!outcome.ok) throw new Error(`doc-flow.mjs 自己画不出合法的图：\n${outcome.errors.join('\n')}`);
-	return outcome.flow;
-})();
+/** Landing: the reviewed write of one landing call. */
+export const land = {
+	id: 'land',
+	kind: 'module',
+	name: '落盘',
+	scope: '从用户点「退出并落盘」到草稿消失',
+	nodes: [
+		{ id: 'n1', label: '用户点「退出并落盘」' },
+		{ id: 'n2', label: '只写本次提交的图，未提交的保持原样' },
+		{ id: 'n3', label: '删掉删除列表里的图' },
+		{ id: 'n4', label: '重画这些图与引用它们的图' },
+		{ id: 'n5', label: '删掉草稿，模式退出' },
+	],
+	edges: [
+		{ from: 'n1', to: 'n2' },
+		{ from: 'n2', to: 'n3' },
+		{ from: 'n3', to: 'n4' },
+		{ from: 'n4', to: 'n5' },
+	],
+};
+
+/** Validation: the gate before anything is written. */
+export const check = {
+	id: 'check',
+	kind: 'module',
+	name: '校验',
+	scope: '从收到提交的图集到给出通过或逐条报错',
+	nodes: [
+		{ id: 'n1', label: '逐张查 id、kind、name、scope' },
+		{ id: 'n2', label: '逐张查节点、连线、回箭头、分叉条件' },
+		{ id: 'n3', label: '查整册：恰好一张总览、引用都指得到、不成环' },
+		{ id: 'n4', label: '给用户看确认框' },
+		{ id: 'n5', label: '点名报错，模型改完重交' },
+	],
+	edges: [
+		{ from: 'n1', to: 'n2' },
+		{ from: 'n2', to: 'n3' },
+		{ from: 'n3', to: 'n4', when: '全部通过' },
+		{ from: 'n3', to: 'n5', when: '有一条不过' },
+		{ from: 'n5', to: 'n1' },
+	],
+};
+
+/** The view: what a person does in the conversation's chart page. */
+export const view = {
+	id: 'view',
+	kind: 'module',
+	name: '看图改图',
+	scope: '从打开「流程图」页到把改好的图存回盘上',
+	nodes: [
+		{ id: 'n1', label: '用户打开会话视图的「流程图」页' },
+		{ id: 'n2', label: '左栏按引用关系列出图集，选中一张' },
+		{ id: 'n3', label: '主区并排显示这张图与它的简报' },
+		{ id: 'n4', label: '用户改框里的文字或连线上的条件' },
+		{ id: 'n5', label: '用户按 Ctrl/Cmd+S' },
+		{ id: 'n6', label: '写盘并重画这张图' },
+		{ id: 'n7', label: '提示冲突，等用户重新载入' },
+	],
+	edges: [
+		{ from: 'n1', to: 'n2' },
+		{ from: 'n2', to: 'n3' },
+		{ from: 'n3', to: 'n4' },
+		{ from: 'n4', to: 'n5' },
+		{ from: 'n5', to: 'n6', when: '盘上没有别人改过' },
+		{ from: 'n5', to: 'n7', when: '盘上的图已经变了' },
+		{ from: 'n7', to: 'n3' },
+	],
+};
+
+/** Everything the run writes, in the order it writes them. */
+export const charts = [overview, check, land, view];
 
 /**
- * Write the chart to `.spec/`, the same way a landing does.
- * @param {string} cwd - the repository root to anchor `.spec` at.
- * @returns {Promise<string>} one line describing what was written.
+ * Write one chart's model and picture.
+ * @param {string} specDir - the absolute `.spec` directory.
+ * @param {string} flowsDir - the absolute chart directory.
+ * @param {object} model - the chart to draw.
+ * @param {Map<string, object>} models - every chart, for module boxes' names.
  */
-export async function writeRepoFlow(cwd = process.cwd()) {
-	const svg = renderFlowSvg(repoFlow, TITLE);
-	ensureSpecDir(resolveSpecDir(cwd));
-
-	// Same order as a landing: the SVG is the layout, the PNG is the product. A
-	// machine with no rasterizer keeps the SVG, which the README would still show.
-	const vector = resolveFlowVectorPath(cwd);
-	writeFileSync(vector, svg);
-	const image = resolveFlowImagePath(cwd);
+async function writeOne(specDir, flowsDir, model, models) {
+	writeChartModel(specDir, model);
+	const svg = renderFlowSvg(drawableChart(model, models), `${model.name}：功能流程`);
+	const vector = join(flowsDir, `${model.id}.svg`);
+	const image = join(flowsDir, `${model.id}.png`);
+	await import('node:fs').then((fs) => fs.writeFileSync(vector, svg, 'utf8'));
 	const renderer = await rasterize(vector, image, svgSize(svg) ?? { width: 640, height: 480 });
-	if (renderer === undefined) return `没有可用的转换器，留下矢量图 ${relative(cwd, vector)}`;
-	unlinkSync(vector);
-	return `已写出 ${relative(cwd, image)}（${renderer}）`;
+	if (renderer !== undefined) {
+		await import('node:fs').then((fs) => {
+			try { fs.unlinkSync(vector); } catch { /* keep the SVG: it is still a picture */ }
+		});
+	}
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-	console.log(await writeRepoFlow());
+/** Validate everything, then write it. Validation first: a broken chart would land a broken picture. */
+async function main() {
+	const cwd = process.cwd();
+	const specDir = resolveSpecDir(cwd);
+	const flowsDir = resolveFlowsDir(cwd);
+	mkdirSync(flowsDir, { recursive: true });
+
+	const models = new Map(charts.map((chart) => [chart.id, chart]));
+	const known = new Set(models.keys());
+	const errors = [];
+	for (const chart of charts) {
+		const outcome = validateChart(chart, { knownModules: known });
+		if (!outcome.ok) errors.push(...outcome.errors.map((error) => `${chart.id}: ${error}`));
+		else models.set(chart.id, outcome.model);
+	}
+	const collection = validateCollection(models);
+	errors.push(...collection.errors);
+	if (errors.length > 0) {
+		console.error(errors.join('\n'));
+		process.exitCode = 1;
+		return;
+	}
+	for (const warning of collection.warnings) console.warn(`warning: ${warning}`);
+
+	for (const chart of charts) await writeOne(specDir, flowsDir, models.get(chart.id), models);
+	for (const chart of charts) console.log(`${chart.id}: ${models.get(chart.id).name}`);
+	console.log(`\n写到 ${flowsDir}`);
 }
+
+main();

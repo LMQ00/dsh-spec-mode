@@ -1,7 +1,7 @@
 /**
- * Advisory-only checks for a spec-mode deliverable write: `AGENTS.md` or
- * `.spec/brief.md`. The flow chart is an image the plugin draws itself, so there
- * is nothing for a write-time check to inspect.
+ * Advisory-only checks for a spec-mode deliverable write: `AGENTS.md`. The charts
+ * and their briefs are written by the plugin's own tools, which validate what
+ * they write, so there is nothing for a write-time check to inspect there.
  *
  * Nothing here blocks a write. `@deepseek-ai/dsh-agent-instructions` reads
  * `AGENTS.md` as a byte-budgeted baseline when the deployment composes it, so an
@@ -10,22 +10,15 @@
  * session's context, so progress recorded in it crowds out the rules and then
  * goes stale with nobody responsible for removing it.
  *
- * The two product files carry their own shape rules, and the hand-written
- * landing path is where those rules need a nudge: a reviewer-approved landing
- * renders from validated arguments, while a `/spec off` landing is written
- * freehand. {@link deliverableAdvisories} reports the shape problems of a
- * freehand write; it never prevents it.
+ * A person may edit a chart's brief by hand and is not held to the brief shape:
+ * the four-section rule exists so a model's plan is readable, and a note someone
+ * wrote for themselves is not a plan. Only `AGENTS.md` gets a write-time check.
  *
  * @module dsh-spec-mode/advisories
  */
 
-import { briefAdvisories } from './brief.js';
-
 /** Line budget above which AGENTS.md adherence measurably degrades. */
 export const AGENTS_MD_LINE_LIMIT = 200;
-
-/** The directory both products live in, as a path segment. */
-const PRODUCT_DIR = '.spec';
 
 /** Line shapes that introduce a labelled block, where a progress record would be written. */
 const STRUCTURAL_LINE_RE = /^\s*(?:#{1,6}\s|\*\*|[-*+]\s|\d+[.)]\s)/;
@@ -78,7 +71,7 @@ function writeTarget(args) {
  * @param {string} toolName - the model-facing tool name.
  * @param {unknown} args - the parsed tool arguments.
  * @param {boolean} isError - whether the call settled as an error.
- * @returns {{ kind: 'agents' | 'brief', path: string, base: string, content: string } | undefined} the write.
+ * @returns {{ kind: 'agents', path: string, base: string, content: string } | undefined} the write.
  */
 export function specDeliverableWrite(toolName, args, isError) {
 	if (isError || toolName !== 'write') return undefined;
@@ -88,8 +81,6 @@ export function specDeliverableWrite(toolName, args, isError) {
 	const base = segments.pop() ?? '';
 	const content = typeof args.content === 'string' ? args.content : '';
 	if (base === 'AGENTS.md') return { kind: 'agents', path: target.target, base, content };
-	if (!segments.includes(PRODUCT_DIR)) return undefined;
-	if (base === 'brief.md') return { kind: 'brief', path: target.target, base, content };
 	return undefined;
 }
 
@@ -142,12 +133,10 @@ export function progressAdvisories(content) {
 }
 
 /**
- * Every advisory for one deliverable write, in a stable order.
- * @param {'agents' | 'brief'} kind - which deliverable this is.
+ * Every advisory for one `AGENTS.md` write, in a stable order.
  * @param {string} content - the exact content being written.
  * @returns {string[]} zero or more advisory messages.
  */
-export function deliverableAdvisories(kind, content) {
-	if (kind === 'brief') return briefAdvisories(content);
+export function deliverableAdvisories(content) {
 	return [...agentsMdAdvisories(content), ...progressAdvisories(content)];
 }

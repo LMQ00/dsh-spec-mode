@@ -37,14 +37,11 @@ export const SPEC_DIR = '.spec';
 /** The interview draft: the only file the guard lets the model write. */
 export const DRAFT_BASENAME = 'draft.md';
 
-/** The requirement brief: what a later model reads as its plan. */
-export const BRIEF_BASENAME = 'brief.md';
-
-/** The functional flow chart: a picture, the only product a person opens. */
-export const FLOW_IMAGE_BASENAME = 'flow.png';
-
-/** The same chart as SVG, kept only when no rasterizer is available. */
-export const FLOW_VECTOR_BASENAME = 'flow.svg';
+/**
+ * The chart collection directory, under `.spec`. Each chart is three files with
+ * one stem: the model, the picture, and the brief that chart exists for.
+ */
+export const FLOWS_DIRNAME = 'flows';
 
 /**
  * DSH's own project-root marker. `@deepseek-ai/dsh-agent-instructions` resolves
@@ -91,32 +88,12 @@ export function resolveDraftPath(cwd) {
 }
 
 /**
- * Absolute path of the requirement brief for one working directory.
+ * Absolute path of the chart collection for one working directory.
  * @param {string} cwd - the session working directory.
- * @returns {string} the absolute brief path.
+ * @returns {string} the absolute chart directory.
  */
-export function resolveBriefPath(cwd) {
-	return join(resolveSpecDir(cwd), BRIEF_BASENAME);
-}
-
-/**
- * Absolute path of the functional flow chart for one working directory. The
- * chart is a raster image; {@link resolveFlowVectorPath} is the fallback the
- * plugin keeps only when no rasterizer is installed.
- * @param {string} cwd - the session working directory.
- * @returns {string} the absolute chart path.
- */
-export function resolveFlowImagePath(cwd) {
-	return join(resolveSpecDir(cwd), FLOW_IMAGE_BASENAME);
-}
-
-/**
- * Absolute path of the vector fallback for one working directory.
- * @param {string} cwd - the session working directory.
- * @returns {string} the absolute SVG path.
- */
-export function resolveFlowVectorPath(cwd) {
-	return join(resolveSpecDir(cwd), FLOW_VECTOR_BASENAME);
+export function resolveFlowsDir(cwd) {
+	return join(resolveSpecDir(cwd), FLOWS_DIRNAME);
 }
 
 /**

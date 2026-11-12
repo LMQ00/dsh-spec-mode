@@ -21,6 +21,9 @@
 /** Longest a node label may run before it stops being readable at a glance. */
 const LABEL_MAX_CHARS = 120;
 
+/** Longest a module port may run. */
+const PORT_MAX_CHARS = 60;
+
 /** Node ids: a short, stable handle a reader can follow in the edge list. */
 const ID_RE = /^[A-Za-z][A-Za-z0-9_-]{0,15}$/;
 
@@ -60,6 +63,19 @@ function labelProblem(label, path) {
 }
 
 /**
+ * One problem with a module reference or one of its ports.
+ * @param {string} text - the trimmed text.
+ * @param {string} path - the field path.
+ * @returns {string | undefined} the problem.
+ */
+function portProblem(text, path) {
+	if (text === '') return `${path}: 不能为空`;
+	if (text.length > PORT_MAX_CHARS) return `${path}: 超过 ${PORT_MAX_CHARS} 字符，端口写的是进出这件事的条件，一句话就够`;
+	const problem = labelProblem(text, path);
+	return problem;
+}
+
+/**
  * The edges that close a loop: the ones that point back at a step the walk has
  * already entered but not yet left.
  *
@@ -94,13 +110,22 @@ export function backEdgesOf(flow) {
 
 /**
  * Validate and normalize one flow chart.
+ *
+ * A node is either a step — `{ id, label }` — or a module — `{ id, module,
+ * ports }`. The second form names another chart in the collection and carries
+ * the conditions that cross into and out of it. The module node has no label of
+ * its own: the box shows the target chart's name, so renaming that chart renames
+ * every place it appears.
+ *
  * @param {unknown} input - the model-supplied `{ nodes, edges }`.
+ * @param {{ knownModules?: Set<string> }} [options] - the chart ids a module node may name.
  * @returns {{ ok: true, flow: { nodes: object[], edges: object[] } } | { ok: false, errors: string[] }} the outcome.
  */
-export function validateFlow(input) {
+export function validateFlow(input, options = {}) {
 	if (input === null || typeof input !== 'object' || Array.isArray(input)) {
-		return { ok: false, errors: ['flow: 必须是 { nodes: [{id,label}], edges: [{from,to,when?}] }'] };
+		return { ok: false, errors: ['flow: 必须是 { nodes: [{id,label}] 或 [{id,module,ports}], edges: [{from,to,when?}] }'] };
 	}
+	const known = options.knownModules;
 	const errors = [];
 	const rawNodes = Array.isArray(input.nodes) ? input.nodes : [];
 	const rawEdges = Array.isArray(input.edges) ? input.edges : [];
@@ -112,11 +137,10 @@ export function validateFlow(input) {
 	rawNodes.forEach((node, index) => {
 		const path = `flow.nodes[${index}]`;
 		if (node === null || typeof node !== 'object') {
-			errors.push(`${path}: 必须是 { id, label }`);
+			errors.push(`${path}: 必须是 { id, label } 或 { id, module, ports }`);
 			return;
 		}
 		const id = typeof node.id === 'string' ? node.id.trim() : '';
-		const label = typeof node.label === 'string' ? node.label.trim() : '';
 		if (!ID_RE.test(id)) {
 			errors.push(`${path}.id: 需匹配 [A-Za-z][A-Za-z0-9_-]{0,15}，收到「${id}」`);
 		} else if (seen.has(id)) {
@@ -124,6 +148,39 @@ export function validateFlow(input) {
 		} else {
 			seen.add(id);
 		}
+
+		// A module node stands for another chart. It has no label — the box takes
+		// the target chart's name — and instead carries the ports that cross the
+		// boundary, which is the only place those conditions can be stated per
+		// parent when one chart is used by two.
+		const moduleId = typeof node.module === 'string' ? node.module.trim() : '';
+		if (moduleId !== '') {
+			if (node.label !== undefined) {
+				errors.push(`${path}.label: 模块节点不写 label——框上的字取自被引用图的名字，写两处迟早对不上`);
+			}
+			if (known !== undefined && !known.has(moduleId)) {
+				errors.push(`${path}.module: 图集里没有「${moduleId}」`);
+			}
+			const ports = Array.isArray(node.ports) ? node.ports : [];
+			if (ports.length === 0) {
+				errors.push(`${path}.ports: 模块节点必须有端口——至少写一条进来的或出去的条件，否则读者不知道这个模块接在哪`);
+			}
+			const clean = [];
+			ports.forEach((port, portIndex) => {
+				const portPath = `${path}.ports[${portIndex}]`;
+				if (typeof port !== 'string') {
+					errors.push(`${portPath}: 必须是字符串`);
+					return;
+				}
+				const problem = portProblem(port.trim(), portPath);
+				if (problem !== undefined) errors.push(problem);
+				clean.push(port.trim());
+			});
+			nodes.push({ id, module: moduleId, ports: clean });
+			return;
+		}
+
+		const label = typeof node.label === 'string' ? node.label.trim() : '';
 		// Two boxes with the same words are indistinguishable in the picture, so a
 		// reader cannot tell which arrow belongs to which step.
 		const owner = labelOwners.get(label);

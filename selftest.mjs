@@ -8,7 +8,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -16,15 +16,30 @@ import { agentsMdAdvisories, deliverableAdvisories, progressAdvisories, specDeli
 import { parseBrief, renderBrief, validateBrief } from './brief.js';
 import { backEdgesOf, validateFlow } from './flow.js';
 import { renderFlowSvg, layersOf, wrapLabel } from './flow-svg.js';
+import {
+	canonicalModel,
+	chartBriefPath,
+	chartImagePath,
+	chartModelPath,
+	drawableChart,
+	parentsOf,
+	readChartBrief,
+	readCollection,
+	referenceGraph,
+	removeChartFiles,
+	revisionOf,
+	validateChart,
+	validateCollection,
+	writeChartBrief,
+	writeChartModel,
+} from './flows.js';
 import { svgSize } from './rasterize.js';
 import { classifyTarget, extractTargetPaths, isDestructiveTool, isWriteTool } from './guard.js';
 import {
 	createSpecProjection,
 	findProjectAnchor,
-	resolveBriefPath,
 	resolveDraftPath,
-	resolveFlowImagePath,
-	resolveFlowVectorPath,
+	resolveFlowsDir,
 	resolveSpecDir,
 } from './state.js';
 
@@ -105,9 +120,7 @@ check('anchor walks up to the nearest .git', () => {
 
 check('the product paths all live in the anchored .spec directory', () => {
 	assert.equal(resolveDraftPath(nested), join(project, '.spec', 'draft.md'));
-	assert.equal(resolveBriefPath(nested), join(project, '.spec', 'brief.md'));
-	assert.equal(resolveFlowImagePath(nested), join(project, '.spec', 'flow.png'));
-	assert.equal(resolveFlowVectorPath(nested), join(project, '.spec', 'flow.svg'));
+	assert.equal(resolveFlowsDir(nested), join(project, '.spec', 'flows'));
 });
 
 check('anchor falls back to cwd without a marker', () => {
@@ -361,28 +374,18 @@ check('a rendered brief reads back into the same brief', () => {
 	assert.deepEqual(back.brief, outcome.brief);
 });
 
-check('a hand-written brief with the right sections passes its advisory', () => {
-	const text = renderBrief(validateBrief(goodBrief).brief);
-	assert.deepEqual(deliverableAdvisories('brief', text), []);
+check('a hand-written brief is not held to the model shape', () => {
+	// The four-section rule exists so a model's plan is readable. A note someone
+	// wrote for themselves is not a plan, so the write path says nothing about it.
+	const text = '# 导出\n\n## 目标\n能导出。\n\n## 要做什么\n- 先做导出，因为要导出。\n';
+	assert.deepEqual(deliverableAdvisories(text), []);
+	const missing = '# 导出\n\n## 目标\n能导出。\n';
+	assert.deepEqual(deliverableAdvisories(missing), []);
 });
 
-check('a hand-written brief that explains itself is reported once', () => {
-	const text = '# 导出\n\n## 目标\n能导出。\n\n## 要做什么\n- 先做导出，因为要导出。\n\n## 验收\n- 能下载。\n';
-	const messages = deliverableAdvisories('brief', text);
-	assert.equal(messages.length, 1);
-	assert.ok(messages[0].includes('brief.md 不合格'));
-	assert.ok(messages[0].includes('理由'));
-});
-
-check('a hand-written brief missing a section is reported', () => {
-	const text = '# 导出\n\n## 目标\n能导出。\n\n## 要做什么\n- 有按钮。\n';
-	const messages = deliverableAdvisories('brief', text);
-	assert.equal(messages.length, 1);
-	assert.ok(messages[0].includes('验收'));
-	assert.deepEqual(deliverableAdvisories('brief', ''), ['Spec mode: brief.md 不合格——brief.md: 文件为空。'
-		+ 'brief 只写需求：`# 标题`，然后「## 目标」「## 要做什么」「## 验收」三节各一行一条，'
-		+ '「## 约束」可有可无；不写代码、不写为什么、不写背景与方案比较，不出现本机绝对路径。'
-		+ '改完再写一次覆盖它。']);
+check('only AGENTS.md is classified as a spec advisory target', () => {
+	assert.deepEqual(specDeliverableWrite('write', { file_path: '.spec/flows/overview.brief.md', content: '# x' }, false), undefined);
+	assert.equal(specDeliverableWrite('write', { file_path: 'AGENTS.md', content: '# x' }, false).kind, 'agents');
 });
 
 /* ---- flow ---- */
@@ -560,10 +563,15 @@ check('a loop is drawn as a route around the boxes', () => {
 			&& Math.max(a.y, b.y) > box.top + 1 && Math.min(a.y, b.y) < box.bottom - 1);
 		assert.equal(hit, undefined, `第 ${index} 段穿过框`);
 	}
-	// It leaves the diagram on the right, which is what keeps it clear of the
-	// downward arrows.
+	// It leaves the diagram on one side or the other, which is what keeps it clear
+	// of the downward arrows. Which side is the shorter detour depends on where the
+	// two boxes sit, so either is correct; running down the middle is not.
 	const rightmost = Math.max(...boxes.map((box) => box.right));
-	assert.ok(points.some((point) => point.x > rightmost), JSON.stringify(points));
+	const leftmost = Math.min(...boxes.map((box) => box.left));
+	assert.ok(
+		points.some((point) => point.x > rightmost || point.x < leftmost),
+		`${JSON.stringify(points)} 全部在 [${leftmost}, ${rightmost}] 之内`,
+	);
 });
 
 check('a retry onto the first row is drawn below the title', () => {
@@ -800,19 +808,368 @@ check('a hand-written brief that would silently lose content is reported', () =>
 	assert.ok(proseOutcome.errors.some((error) => error.includes('不是一条列表项')), proseOutcome.errors.join('；'));
 });
 
+/* ---- chart collection ---- */
+
+/** A minimal valid overview, used as the base of most collection checks. */
+const overviewChart = {
+	id: 'overview',
+	kind: 'overview',
+	name: '总览',
+	scope: '从用户提出想法到产物写回盘上',
+	nodes: [
+		{ id: 'n1', label: '用户提出想法' },
+		{ id: 'n2', label: '模型整理成图集' },
+	],
+	edges: [{ from: 'n1', to: 'n2' }],
+};
+
+/** A module chart the overview can point at. */
+const moduleChart = {
+	id: 'landing',
+	kind: 'module',
+	name: '落盘',
+	scope: '从确认到写文件',
+	nodes: [
+		{ id: 'm1', label: '用户确认' },
+		{ id: 'm2', label: '工具写文件' },
+	],
+	edges: [{ from: 'm1', to: 'm2' }],
+};
+
+/** The overview with a module node added, for the checks that need one. */
+const withModule = (ports = ['入：图集已校验', '出：盘上有三件套']) => ({
+	...overviewChart,
+	nodes: [
+		{ id: 'n1', label: '用户提出想法' },
+		{ id: 'n2', module: 'landing', ports },
+	],
+});
+
+/** A temporary `.spec` directory for the checks that write files. */
+function specSandbox() {
+	const root = mkdtempSync(join(tmpdir(), 'spec-flows-'));
+	const specDir = join(root, '.spec');
+	mkdirSync(specDir, { recursive: true });
+	return specDir;
+}
+
+check('a chart model carries the four fields a reader needs', () => {
+	const outcome = validateChart(overviewChart);
+	assert.equal(outcome.ok, true, JSON.stringify(outcome.errors));
+	assert.deepEqual(Object.keys(outcome.model), ['id', 'kind', 'name', 'scope', 'nodes', 'edges']);
+});
+
+check('a chart without a scope, name or kind is refused by field path', () => {
+	const missingScope = validateChart({ ...overviewChart, scope: '' });
+	assert.equal(missingScope.ok, false);
+	assert.ok(missingScope.errors[0].startsWith('chart.scope'), missingScope.errors[0]);
+
+	const missingName = validateChart({ ...overviewChart, name: '  ' });
+	assert.equal(missingName.ok, false);
+	assert.ok(missingName.errors[0].startsWith('chart.name'));
+
+	const badKind = validateChart({ ...overviewChart, kind: 'flow' });
+	assert.equal(badKind.ok, false);
+	assert.ok(badKind.errors[0].startsWith('chart.kind'));
+
+	// The id is the file name, so its shape is the file system's, not prose's.
+	const badId = validateChart({ ...overviewChart, id: 'Landing Page' });
+	assert.equal(badId.ok, false);
+	assert.ok(badId.errors[0].startsWith('chart.id'));
+});
+
+check('a scope that names no boundary is refused', () => {
+	// 「本次」「相关」 is exactly the ambiguity this field exists to remove: a chart
+	// labelled that way is back to being an unlabelled one.
+	for (const vague of ['本次相关流程', '和导出相关的部分', '一些模块']) {
+		const outcome = validateChart({ ...overviewChart, scope: vague });
+		assert.equal(outcome.ok, false, vague);
+		assert.ok(outcome.errors[0].includes('无边界'), outcome.errors[0]);
+	}
+});
+
+check('a module node takes its words from the chart it points at', () => {
+	const models = new Map([
+		['overview', withModule()],
+		['landing', moduleChart],
+	]);
+	const drawn = drawableChart(models.get('overview'), models);
+	const box = drawn.nodes.find((node) => node.id === 'n2');
+	assert.equal(box.label, '落盘');
+	assert.equal(box.isModule, true);
+	assert.deepEqual(box.ports, ['入：图集已校验', '出：盘上有三件套']);
+
+	// Renaming the module chart changes the parent's box without touching the
+	// parent's model — that is why the name is not stored in the parent.
+	const renamed = new Map(models);
+	renamed.set('landing', { ...moduleChart, name: '写入磁盘' });
+	assert.equal(drawableChart(renamed.get('overview'), renamed).nodes.find((node) => node.id === 'n2').label, '写入磁盘');
+});
+
+check('a module node without ports, a label or a real target is refused', () => {
+	const noPorts = validateChart({
+		...overviewChart,
+		nodes: [{ id: 'n1', label: '开始' }, { id: 'n2', module: 'landing' }],
+	}, { knownModules: new Set(['landing']) });
+	assert.equal(noPorts.ok, false);
+	assert.ok(noPorts.errors.some((error) => error.includes('ports')), noPorts.errors.join('；'));
+
+	const withLabel = validateChart({
+		...overviewChart,
+		nodes: [{ id: 'n1', label: '开始' }, { id: 'n2', module: 'landing', label: '落盘', ports: ['出：写好了'] }],
+	}, { knownModules: new Set(['landing']) });
+	assert.equal(withLabel.ok, false);
+	assert.ok(withLabel.errors.some((error) => error.includes('label')), withLabel.errors.join('；'));
+
+	const dangling = validateChart({
+		...overviewChart,
+		nodes: [{ id: 'n1', label: '开始' }, { id: 'n2', module: 'nowhere', ports: ['出：写好了'] }],
+	}, { knownModules: new Set(['landing']) });
+	assert.equal(dangling.ok, false);
+	assert.ok(dangling.errors.some((error) => error.includes('nowhere')), dangling.errors.join('；'));
+});
+
+check('the same module may appear twice in one parent, each with its own ports', () => {
+	const twice = {
+		...overviewChart,
+		nodes: [
+			{ id: 'n1', label: '开始' },
+			{ id: 'n2', module: 'landing', ports: ['入：走了这条路'] },
+			{ id: 'n3', module: 'landing', ports: ['入：走了那条路'] },
+		],
+		edges: [{ from: 'n1', to: 'n2', when: '甲' }, { from: 'n1', to: 'n3', when: '乙' }],
+	};
+	const outcome = validateChart(twice, { knownModules: new Set(['landing']) });
+	assert.equal(outcome.ok, true, JSON.stringify(outcome.errors));
+});
+
+check('the collection needs exactly one overview', () => {
+	const none = validateCollection(new Map([['landing', moduleChart]]));
+	assert.equal(none.errors.length, 1);
+	assert.ok(none.errors[0].includes('总览'), none.errors[0]);
+
+	const two = validateCollection(new Map([
+		['overview', overviewChart],
+		['outline', { ...overviewChart, id: 'outline' }],
+	]));
+	assert.equal(two.errors.length, 1);
+	assert.ok(two.errors[0].includes('只能有一张'), two.errors[0]);
+
+	const one = validateCollection(new Map([
+		['overview', withModule()],
+		['landing', moduleChart],
+	]));
+	assert.deepEqual(one.errors, []);
+});
+
+check('a reference to a chart that is not there is named on both ends', () => {
+	const outcome = validateCollection(new Map([['overview', withModule()]]));
+	assert.equal(outcome.errors.length, 1);
+	assert.ok(outcome.errors[0].includes('overview'), outcome.errors[0]);
+	assert.ok(outcome.errors[0].includes('landing'), outcome.errors[0]);
+});
+
+check('a reference cycle is reported as the path that closes it', () => {
+	const a = { ...moduleChart, id: 'a', nodes: [{ id: 'x', label: '一' }, { id: 'y', module: 'b', ports: ['出：到 b'] }], edges: [{ from: 'x', to: 'y' }] };
+	const b = { ...moduleChart, id: 'b', nodes: [{ id: 'x', label: '二' }, { id: 'y', module: 'a', ports: ['出：回 a'] }], edges: [{ from: 'x', to: 'y' }] };
+	const outcome = validateCollection(new Map([
+		['overview', overviewChart],
+		['a', a],
+		['b', b],
+	]));
+	assert.ok(outcome.errors.some((error) => error.includes('成环')), outcome.errors.join('；'));
+	assert.ok(outcome.errors.some((error) => error.includes('a') && error.includes('b')), outcome.errors.join('；'));
+});
+
+check('an orphan chart is a warning, never an error', () => {
+	const outcome = validateCollection(new Map([
+		['overview', overviewChart],
+		['landing', moduleChart],
+	]));
+	assert.deepEqual(outcome.errors, []);
+	assert.equal(outcome.warnings.length, 1);
+	assert.ok(outcome.warnings[0].includes('landing'), outcome.warnings[0]);
+});
+
+check('a layer wider than the page wraps instead of growing sideways', () => {
+	// Without wrapping, eight module boxes on one layer are 1481px wide, so the
+	// reader has to drag the pane left and right to read one diagram.
+	const fan = (count) => ({
+		nodes: [
+			{ id: 's', label: '开始' },
+			...Array.from({ length: count }, (_, index) => ({ id: `m${index}`, label: `模块 ${index + 1}` })),
+			{ id: 'e', label: '结束' },
+		],
+		edges: [
+			...Array.from({ length: count }, (_, index) => ({ from: 's', to: `m${index}`, when: `条件 ${index + 1}` })),
+			...Array.from({ length: count }, (_, index) => ({ from: `m${index}`, to: 'e' })),
+		],
+	});
+	const wide = renderFlowSvg(fan(15), '十五个模块');
+	const width = Number(/<svg[^>]*width="(\d+)"/.exec(wide)[1]);
+	assert.ok(width < 1400, `十五个模块画成 ${width}px 宽，读者得左右拖`);
+	// The wrap is real: those boxes occupy several visual rows.
+	const rows = new Set([...wide.matchAll(/data-row="(\d+)"/g)].map((match) => match[1]));
+	assert.ok(rows.size > 3, `视觉行只有 ${rows.size} 个`);
+	// Every box is still inside the canvas: wrapping moves boxes, it does not crop them.
+	for (const match of wide.matchAll(/<rect x="(-?[\d.]+)" y="(-?[\d.]+)" width="([\d.]+)" height="([\d.]+)" rx="9"/g)) {
+		const left = Number(match[1]);
+		assert.ok(left >= 0 && left + Number(match[3]) <= width, `框在画布外：x=${left}, 画布宽 ${width}`);
+	}
+});
+
+check('a continuation row sits closer than the next step', () => {
+	// The gap is the only cue that two rows are one step: spaced like a step, the
+	// reader reads a wrapped layer as two stages of the flow.
+	const fan = (count) => ({
+		nodes: [{ id: 's', label: '开始' }, ...Array.from({ length: count }, (_, index) => ({ id: `m${index}`, label: `模块 ${index + 1}` }))],
+		edges: Array.from({ length: count }, (_, index) => ({ from: 's', to: `m${index}`, when: `条件 ${index + 1}` })),
+	});
+	const svg = renderFlowSvg(fan(9), '换行间距');
+	const tops = new Map();
+	for (const match of svg.matchAll(/data-layer="(\d+)" data-row="(\d+)"[^>]*>\s*<rect x="[-\d.]+" y="([\d.]+)"/g)) {
+		tops.set(`${match[1]}:${match[2]}`, Number(match[3]));
+	}
+	const sameLayer = [...tops.entries()].filter(([key]) => key.startsWith('1:')).map(([, y]) => y).sort((a, b) => a - b);
+	assert.ok(sameLayer.length > 1, JSON.stringify([...tops.keys()]));
+	const wrapStep = sameLayer[1] - sameLayer[0];
+	// The only other layer is the source row above it.
+	const earlier = tops.get('0:0');
+	const nextStep = sameLayer[0] - earlier;
+	assert.ok(wrapStep < nextStep, `同层换行间距 ${wrapStep}，到上一层 ${nextStep}`);
+});
+
+check('the picture carries the ids the view needs to make it clickable', () => {
+	const outcome = validateFlow(goodFlow);
+	const plain = renderFlowSvg(outcome.flow, '可点');
+	for (const node of outcome.flow.nodes) assert.ok(plain.includes(`data-node="${node.id}"`), node.id);
+	// The separator is escaped in the attribute, which is how XML carries `>`.
+	for (const edge of outcome.flow.edges) assert.ok(plain.includes(`data-edge="${edge.from}-&gt;${edge.to}"`));
+	// The product written to disk has no drag handle: a handle on a diagram is
+	// chrome the reader cannot use.
+	assert.equal((plain.match(/data-handle=/g) ?? []).length, 0);
+	const interactive = renderFlowSvg(outcome.flow, '可点', { interactive: true });
+	assert.equal((interactive.match(/data-handle=/g) ?? []).length, outcome.flow.nodes.length);
+});
+
+check('a chart with more than six modules at the top is warned about', () => {
+	const nodes = [{ id: 'n0', label: '开始' }];
+	const edges = [];
+	for (let index = 1; index <= 7; index += 1) {
+		nodes.push({ id: `n${index}`, module: 'landing', ports: [`入：第 ${index} 条路`] });
+		edges.push({ from: 'n0', to: `n${index}`, when: `条件 ${index}` });
+	}
+	const outcome = validateCollection(new Map([
+		['overview', { ...overviewChart, nodes, edges }],
+		['landing', moduleChart],
+	]));
+	assert.deepEqual(outcome.errors, []);
+	assert.ok(outcome.warnings.some((warning) => warning.includes('7 个模块框')), outcome.warnings.join('；'));
+});
+
+check('deleting a chart that something points at, or the only overview, is refused', () => {
+	const models = new Map([
+		['overview', withModule()],
+		['landing', moduleChart],
+	]);
+	const referenced = validateCollection(models, { removed: ['landing'] });
+	assert.ok(referenced.errors.some((error) => error.includes('overview')), referenced.errors.join('；'));
+
+	const theOverview = validateCollection(models, { removed: ['overview'] });
+	assert.ok(theOverview.errors.some((error) => error.includes('总览')), theOverview.errors.join('；'));
+
+	const clean = validateCollection(new Map([['overview', overviewChart], ['landing', moduleChart]]), { removed: ['landing'] });
+	assert.deepEqual(clean.errors, []);
+});
+
+check('the revision is a hash of the canonical model, so reordering the same model agrees', () => {
+	const first = revisionOf(overviewChart);
+	const rebuilt = JSON.parse(JSON.stringify(overviewChart));
+	assert.equal(revisionOf(rebuilt), first);
+	// The canonical text fixes the key order, so two writers that build the same
+	// model in a different field order still produce one revision.
+	assert.equal(revisionOf({ edges: overviewChart.edges, nodes: overviewChart.nodes, scope: overviewChart.scope, name: overviewChart.name, kind: overviewChart.kind, id: overviewChart.id }), first);
+	assert.equal(canonicalModel(overviewChart).startsWith('{\n\t"id"'), true);
+	// A real edit changes it.
+	assert.notEqual(revisionOf({ ...overviewChart, scope: '从别处到别处' }), first);
+});
+
+check('a chart round-trips through disk with its brief', () => {
+	const specDir = specSandbox();
+	const written = writeChartModel(specDir, overviewChart);
+	assert.equal(written.path, chartModelPath(specDir, 'overview'));
+	assert.equal(written.path, join(specDir, 'flows', 'overview.json'));
+	assert.equal(chartImagePath(specDir, 'overview'), join(specDir, 'flows', 'overview.png'));
+	assert.equal(chartBriefPath(specDir, 'overview'), join(specDir, 'flows', 'overview.brief.md'));
+
+	writeChartBrief(specDir, 'overview', '# 总览\n\n## 目标\n看得懂。\n');
+	assert.ok(readChartBrief(specDir, 'overview').includes('# 总览'));
+
+	const { charts, problems } = readCollection(specDir);
+	assert.deepEqual(problems, []);
+	assert.equal(charts.get('overview').revision, written.revision);
+
+	// An empty brief removes the file, so "no brief yet" has one representation.
+	writeChartBrief(specDir, 'overview', '   ');
+	assert.equal(readChartBrief(specDir, 'overview'), '');
+
+	removeChartFiles(specDir, 'overview');
+	assert.equal(readCollection(specDir).charts.size, 0);
+});
+
+check('a chart file that will not parse is reported and does not hide the rest', () => {
+	const specDir = specSandbox();
+	writeChartModel(specDir, overviewChart);
+	writeFileSync(join(specDir, 'flows', 'broken.json'), '{ not json', 'utf8');
+	const { charts, problems } = readCollection(specDir);
+	assert.equal(charts.size, 1);
+	assert.equal(problems.length, 1);
+	assert.ok(problems[0].includes('broken'), problems[0]);
+});
+
+check('the reference graph reports parents and children both ways', () => {
+	const models = new Map([
+		['overview', withModule()],
+		['landing', moduleChart],
+	]);
+	const graph = referenceGraph(models);
+	assert.deepEqual(graph.parents.get('landing'), ['overview']);
+	assert.deepEqual(graph.children.get('overview'), ['landing']);
+	assert.deepEqual(graph.cycles, []);
+	assert.deepEqual(parentsOf(models, 'landing'), ['overview']);
+	assert.deepEqual(parentsOf(models, 'overview'), []);
+});
+
+check('a module box draws its name and ports, and the port lines stay inside the box', () => {
+	const models = new Map([
+		['overview', withModule()],
+		['landing', moduleChart],
+	]);
+	const svg = renderFlowSvg(drawableChart(models.get('overview'), models), '图集：功能流程');
+	assert.ok(svg.includes('落盘'), '框上要有子图的名字');
+	assert.ok(svg.includes('入：图集已校验'));
+	assert.ok(svg.includes('出：盘上有三件套'));
+	// A module box carries a second, inset outline: it is a container, and the
+	// outline says so before the reader parses the ports.
+	const outlines = [...svg.matchAll(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)" rx="(\d)"/g)];
+	const nested = outlines.filter((match) => match[5] === '7');
+	assert.equal(nested.length, 1, JSON.stringify(outlines.map((match) => match[5])));
+});
+
 /* ---- deliverable classification ---- */
 
 check('a deliverable write is classified by its target', () => {
 	assert.equal(specDeliverableWrite('write', { file_path: 'AGENTS.md', content: 'hi' }, false).kind, 'agents');
 	assert.equal(specDeliverableWrite('write', { path: 'docs/AGENTS.md', content: 'hi' }, false).kind, 'agents');
-	assert.equal(specDeliverableWrite('write', { path: '.spec/brief.md', content: 'hi' }, false).kind, 'brief');
-	assert.equal(specDeliverableWrite('write', { file_path: '.spec/flow.md', content: 'hi' }, false), undefined, '流程图是插件自己画的图，不是模型写的文件');
-	assert.equal(specDeliverableWrite('write', { file_path: 'a/.spec/brief.md', content: 'hi' }, false).kind, 'brief');
+	// A chart brief is a chart's own file, not a landing deliverable: a person may
+	// edit it freely and a model writes it through a tool that validates it.
+	assert.equal(specDeliverableWrite('write', { path: '.spec/flows/overview.brief.md', content: 'hi' }, false), undefined);
+	assert.equal(specDeliverableWrite('write', { file_path: '.spec/flows/overview.json', content: '{}' }, false), undefined);
 	assert.equal(specDeliverableWrite('write', { file_path: '.spec/draft.md', content: 'x' }, false), undefined);
 	assert.equal(specDeliverableWrite('write', { file_path: 'docs/api.md', content: 'hi' }, false), undefined);
 	assert.equal(specDeliverableWrite('write', { file_path: 'README.md', content: 'hi' }, false), undefined);
-	assert.equal(specDeliverableWrite('edit', { file_path: '.spec/brief.md' }, false), undefined);
-	assert.equal(specDeliverableWrite('write', { file_path: '.spec/brief.md', content: 'x' }, true), undefined);
+	assert.equal(specDeliverableWrite('edit', { file_path: 'AGENTS.md' }, false), undefined);
+	assert.equal(specDeliverableWrite('write', { file_path: 'AGENTS.md', content: 'x' }, true), undefined);
 });
 
 /* ---- AGENTS.md ---- */
@@ -840,7 +1197,7 @@ check('progress content is reported only on labelled structural lines', () => {
 
 check('one AGENTS.md write collects both its checks', () => {
 	const body = `${Array.from({ length: 201 }, () => 'x').join('\n')}\n\n## 现状\n\n已装入。\n`;
-	assert.equal(deliverableAdvisories('agents', body).length, 2);
+	assert.equal(deliverableAdvisories(body).length, 2);
 });
 
 console.log(`\n${passed} checks passed`);
