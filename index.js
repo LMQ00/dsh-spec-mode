@@ -516,7 +516,7 @@ export function apply(ctx) {
 						+ (value.warnings.length > 0 ? `\n\n提醒：\n${value.warnings.map((line) => `- ${line}`).join('\n')}` : '')
 						+ '\n\n现在只剩一步：写 AGENTS.md —— 只放文档索引（指向 `.spec/flows/` 与本仓库的文档）'
 						+ '与可证伪的开发规范规则（每条标注代码强制还是提示词），不写开头介绍句，'
-						+ '不写现状、进度、待办、里程碑这类内容。不要新增 docs/ 文档。',
+						+ '不写现状、进度、待办、里程碑这类内容。',
 				},
 			],
 		},

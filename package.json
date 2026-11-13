@@ -43,6 +43,7 @@
     "landing-test.mjs",
     "doc-flow.mjs",
     "README.md",
+    "docs",
     "LICENSE",
     "icon.svg",
     ".spec/flows/*.json",
