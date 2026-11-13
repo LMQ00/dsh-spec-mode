@@ -64,6 +64,7 @@ window.__ModuleLoader__.load({
 			briefHint: '四节：目标 / 要做什么 / 验收 / 约束。人可以随便写，模型写的会被校验。',
 			renderFailed: '渲染失败',
 			mermaidFailed: 'mermaid 库没加载起来：宿主那条 mermaid.js 路由没通。',
+			unsavedSwitch: '这张图还没保存。先保存，或者切走前把改动丢掉。',
 			problems: '读不出来的文件',
 			parents: '被引用',
 			noSelection: '左边选一张图。',
@@ -98,6 +99,7 @@ window.__ModuleLoader__.load({
 			briefHint: 'Four sections: goal / what to build / acceptance / constraints. A person may write freely; a model’s brief is validated.',
 			renderFailed: 'Render failed',
 			mermaidFailed: 'The mermaid library did not load: the Host route for mermaid.js is not answering.',
+			unsavedSwitch: 'This chart has unsaved changes. Save them, or reload the chart to drop them.',
 			problems: 'Unreadable files',
 			parents: 'Referenced by',
 			noSelection: 'Pick a chart on the left.',
@@ -115,7 +117,11 @@ window.__ModuleLoader__.load({
 		 */
 		function routeUrl(verb, query = {}) {
 			const params = new URLSearchParams(query);
-			const base = typeof document === 'undefined' ? 'http://localhost/' : document.baseURI;
+			// 没有结尾斜杠时 `new URL('spec/flows/list', base)` 会替掉最后一段路径，
+			// 请求就打到别处去了。
+			const base = typeof document === 'undefined'
+				? 'http://localhost/'
+				: (document.baseURI.endsWith('/') ? document.baseURI : `${document.baseURI}/`);
 			const url = new URL(`${SPEC_FLOWS_ROUTE}/${verb}`, base);
 			for (const [key, value] of params) url.searchParams.set(key, value);
 			return url.toString();
@@ -578,8 +584,20 @@ window.__ModuleLoader__.load({
 				touch();
 			};
 
-			// 没改过源码就用宿主画好的那份，改了就直接画源码。
-			const text = sourceEdited || drawn === '' ? source : drawn;
+			/**
+			 * 编辑态下把模块框第一行换成被引用图的标题。
+			 * 宿主那份 `drawn` 只在载入时算得出来；用户一敲键盘就得自己替换，
+			 * 否则框上会退回写 id。
+			 * @param {string} raw - 源码原文。
+			 * @returns {string} 可渲染的源码。
+			 */
+			const renameModules = (raw) => raw.replace(/(\[\[")([a-z][a-z0-9-]{0,23})(?=<br\/>|"\]\])/g, (whole, head, id) => {
+				const found = state.charts.find((chart) => chart.id === id);
+				return found === undefined ? whole : `${head}${found.name}`;
+			});
+
+			// 没改过源码就用宿主画好的那份；改过就用源码，并把模块框的名字补上。
+			const text = drawn === '' ? source : (sourceEdited ? renameModules(source) : drawn);
 			const shown = mode ?? (narrow ? 'source' : 'preview');
 
 			// 源码视图里也照画：写错一行时红字要和那段源码在同一屏。
@@ -708,7 +726,15 @@ window.__ModuleLoader__.load({
 							h('button', {
 								type: 'button',
 								style: styles.item(chart.id === selected),
-								onClick: () => { setBanner(null); void load(chart.id); },
+								onClick: () => {
+									// 直接换图会把没保存的改动覆盖掉，先让用户处理那一步。
+									if (dirty && chart.id !== draft?.id) {
+										setBanner({ kind: 'warn', text: t('unsavedSwitch') });
+										return;
+									}
+									setBanner(null);
+									void load(chart.id);
+								},
 							},
 							h('span', { style: styles.itemName }, chart.name || chart.id),
 							h('span', { style: styles.itemMeta }, chart.scope || chart.id),

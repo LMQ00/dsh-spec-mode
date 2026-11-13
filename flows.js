@@ -229,9 +229,15 @@ export function validateChart(input, options = {}) {
 	// The name is copied into every parent's mermaid when that parent is drawn, so
 	// it has to survive being put inside a quoted label.
 	else if (name.includes('"') || name.includes('<')) errors.push('chart.name: 含双引号或 <；它要出现在引用它的模块框里，换成「」');
+	// The title is one line of the file: a newline in it would end the heading and
+	// turn the rest into the scope.
+	else if (/[\r\n]/.test(name)) errors.push('chart.name: 只能一行');
 	const scope = typeof input.scope === 'string' ? input.scope.trim() : '';
 	if (scope === '') errors.push('chart.scope: 不能为空——它说明这张图从哪到哪，是这份图集存在的理由');
 	else if (scope.length > SCOPE_MAX_CHARS) errors.push(`chart.scope: 超过 ${SCOPE_MAX_CHARS} 字符，说清楚从哪到哪就够`);
+	// The scope is the paragraph between the title and the diagram: a second line
+	// is fine in prose, but a fence in it would start the diagram early.
+	else if (scope.includes('```')) errors.push('chart.scope: 含 ``` ；那是图的围栏，范围行写从哪到哪');
 	else {
 		const vague = VAGUE_SCOPE_RE.exec(scope);
 		if (vague !== null) {
@@ -240,14 +246,29 @@ export function validateChart(input, options = {}) {
 	}
 	if (errors.length > 0) return { ok: false, errors };
 
-	const source = typeof input.source === 'string' ? input.source : '';
+	// One line ending for the whole file: a paste from Windows would otherwise keep
+	// its `\r` on disk and come back without it, moving the revision on a save that
+	// changed nothing.
+	const source = typeof input.source === 'string' ? input.source.replace(/\r\n?/g, '\n') : '';
 	const drawn = graphOf({ source }, options);
 	if (!drawn.ok) return { ok: false, errors: drawn.errors };
-	return {
-		ok: true,
-		chart: { id, name, scope, source: source.endsWith('\n') ? source : `${source}\n`, brief: typeof input.brief === 'string' ? input.brief.trim() : '' },
-		graph: drawn.graph,
-	};
+	const brief = typeof input.brief === 'string' ? input.brief.trim() : '';
+	// The brief sits under `## 简报`, in a file that already starts with the chart's
+	// title; a second `# ` there would give the document two names.
+	if (/^#\s/m.test(brief)) {
+		errors.push('chart.brief: 简报里不写 `# 标题`——文件第一行就是这张图的标题');
+		return { ok: false, errors };
+	}
+	const chart = { id, name, scope, source: source.endsWith('\n') ? source : `${source}\n`, brief };
+	// What is written has to read back as what was validated. This is the one check
+	// that cannot be fooled: a name with a newline, a scope that looks like a fence,
+	// a brief that swallows the next heading — all of them come back different.
+	const back = parseChartMarkdown(id, canonicalMarkdown(chart));
+	if (back.broken !== undefined) return { ok: false, errors: [`chart: ${back.broken}`] };
+	if (back.chart.name !== name) return { ok: false, errors: ['chart.name: 写进文件再读出来就不是这个标题了；只能一行，也不要写 `#`'] };
+	if (back.chart.scope.trim() !== scope) return { ok: false, errors: ['chart.scope: 写进文件再读出来就不是这个范围了；写成一行'] };
+	if (back.chart.brief.trim() !== brief) return { ok: false, errors: ['chart.brief: 写进文件再读出来就不是这份简报了；别在简报里写 `## 简报`'] };
+	return { ok: true, chart, graph: drawn.graph };
 }
 
 /**

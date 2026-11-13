@@ -57,20 +57,13 @@ export function revisionOf(text) {
  */
 export function canonicalMarkdown(chart) {
 	const brief = (chart.brief ?? '').trim();
-	const body = [
-		`# ${chart.name}`,
-		'',
-		chart.scope,
-		'',
-		FENCE,
-		chart.source.trimEnd(),
-		'```',
-		'',
-		BRIEF_HEADING,
-		'',
-		brief,
-	];
-	return `${body.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()}\n`;
+	// The four blocks are joined with exactly the blank lines between them. Nothing
+	// is collapsed: the diagram and the brief are text someone wrote, and rewriting
+	// its blank lines would change bytes it never asked to change.
+	const head = `# ${chart.name}\n\n${chart.scope}\n\n`;
+	const block = `${FENCE}\n${chart.source.trimEnd()}\n\`\`\`\n\n`;
+	const tail = brief === '' ? BRIEF_HEADING : `${BRIEF_HEADING}\n\n${brief}`;
+	return `${head}${block}${tail}\n`;
 }
 
 /**
@@ -85,7 +78,9 @@ export function canonicalMarkdown(chart) {
  * @returns {{ chart: object } | { broken: string }} the chart or the problem.
  */
 export function parseChartMarkdown(id, text) {
-	const lines = String(text ?? '').split(/\r?\n/);
+	// A byte-order mark is what an editor leaves behind; without stripping it the
+	// title line is not a heading and the whole file "has no title".
+	const lines = String(text ?? '').replace(/^\uFEFF/, '').split(/\r?\n/);
 	const titleAt = lines.findIndex((line) => /^#\s+\S/.test(line));
 	if (titleAt === -1) return { broken: `${id}${CHART_EXT} 少了标题行「# 这张图叫什么」` };
 	const name = lines[titleAt].replace(/^#\s+/, '').trim();

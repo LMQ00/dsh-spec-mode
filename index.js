@@ -23,7 +23,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { readFileSync, unlinkSync } from 'node:fs';
+import { unlinkSync } from 'node:fs';
 
 import { agentsMdAdvisories, specDeliverableWrite } from './advisories.js';
 import { validateBrief } from './brief.js';
@@ -217,20 +217,6 @@ function repairError(toolName, errors) {
 		`${toolName} 的参数不合格——先改这些再调一次：\n`
 		+ errors.map((error) => `- ${error}`).join('\n'),
 	);
-}
-
-/**
- * Write one file, surfacing the target path when it fails. A landing that half
- * succeeded must say which half.
- * @param {string} filePath - the absolute target path.
- * @param {string} content - the file content.
- */
-function writeProduct(filePath, content) {
-	try {
-		writeFileSync(filePath, content, 'utf8');
-	} catch (error) {
-		throw new Error(`落盘失败（${filePath}）：${error?.message ?? error}。产物未写完，草稿保留，修正后重新调用。`);
-	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -469,7 +455,19 @@ export function apply(ctx) {
 			const written = [];
 			const briefs = new Map();
 			for (const [index, raw] of submitted.entries()) {
-				const outcome = validateChart(raw, { knownModules: known });
+				// A chart submitted without a brief keeps the one on disk: the brief is
+				// optional in this tool, and "I only rewrote the diagram" is the common
+				// case. An explicit empty string is how a brief is cleared.
+				const submittedId = typeof raw?.id === 'string' ? raw.id.trim() : '';
+				const inherited = entries.get(submittedId)?.chart.brief;
+				const candidate = typeof raw?.brief === 'string' || inherited === undefined || raw === null || typeof raw !== 'object'
+					? raw
+					: { ...raw, brief: inherited };
+				if (submittedId !== '' && removed.includes(submittedId)) {
+					errors.push(`charts[${index}].id: 「${submittedId}」同时在 charts 与 removed 里`);
+					continue;
+				}
+				const outcome = validateChart(candidate, { knownModules: known });
 				if (!outcome.ok) {
 					errors.push(...outcome.errors.map((error) => `charts[${index}] ${error}`));
 					continue;
@@ -702,7 +700,12 @@ export function apply(ctx) {
 			const outgoing = args?.chart;
 			const candidateId = typeof outgoing?.id === 'string' ? outgoing.id.trim() : '';
 			const known = new Set([...existing.keys(), candidateId]);
-			const outcome = validateChart(outgoing, { knownModules: known });
+			// Same rule as the landing: no brief field means "keep the one on disk".
+			const inherited = existing.get(candidateId)?.chart.brief;
+			const candidate = typeof outgoing?.brief === 'string' || inherited === undefined || outgoing === null || typeof outgoing !== 'object'
+				? outgoing
+				: { ...outgoing, brief: inherited };
+			const outcome = validateChart(candidate, { knownModules: known });
 			if (!outcome.ok) throw repairError(WRITE_TOOL_NAME, [...problems, ...outcome.errors]);
 
 			// A brand-new chart may be added at any time; an existing one is only

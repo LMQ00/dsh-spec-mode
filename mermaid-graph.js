@@ -26,7 +26,7 @@ const LABEL_MAX_CHARS = 120;
 const PORT_MAX_CHARS = 60;
 
 /** Node ids: a short, stable handle a reader can follow in the edge list. */
-const ID_RE = /^[A-Za-z][A-Za-z0-9_-]{0,15}$/;
+const ID_RE = /^[A-Za-z][A-Za-z0-9_-]{0,23}$/;
 
 /** The separator mermaid draws a line break at, inside a label. */
 export const LABEL_BREAK = '<br/>';
@@ -38,8 +38,11 @@ const REASON_RE = new RegExp(
 	'i',
 );
 
+/** Longest a branch condition may run. */
+const WHEN_MAX_CHARS = 40;
+
 /** A machine-specific absolute path: never in a product file. */
-const LOCAL_PATH_RE = /(?:^|[\s(（`"'])(?:\/home\/|\/Users\/|\/storage\/|\/nix\/store\/|[A-Za-z]:[\\/])/;
+const LOCAL_PATH_RE = /(?:^|[\s(（`"'：，,；;、。「」【】])(?:\/home\/|\/Users\/|\/storage\/|\/nix\/store\/|[A-Za-z]:[\\/])/;
 
 /** A fenced code block, which the flow chart never carries. */
 const CODE_FENCE_RE = /^\s*```/;
@@ -58,7 +61,12 @@ const SHAPES = [
 	{ open: '{', close: '}' },
 ];
 
-/** An arrow, and the optional `|condition|` that follows it on the same edge. */
+/**
+ * The one arrow this format draws. A dotted or thick arrow renders
+ * differently from what the file says, and the picture is drawn again from
+ * this text every time — so the text is the picture, and it carries one arrow.
+ */
+const PLAIN_ARROW = '-->';
 const ARROW_RE = /\s*(-->|-.->|==>|---)\s*(?:\|([^|]*)\|\s*)?/;
 
 /** Lines of a diagram that carry no graph and are dropped before parsing. */
@@ -112,9 +120,16 @@ function parseNodeRef(raw) {
 	if (rest === '') return { id };
 	for (const shape of SHAPES) {
 		if (!rest.startsWith(shape.open) || !rest.endsWith(shape.close) || rest.length < shape.open.length + shape.close.length) continue;
+		// Only the two boxes this format draws: a rounded, diamond or circle node
+		// would come back from the next save as a plain box, so the file keeps one.
+		if (shape.open !== '[' && shape.open !== '[[') {
+			return { error: `节点 ${id} 用了 ${shape.open}${shape.close}；框只有 n1["…"] 与模块框 n4[["…"]] 两种写法` };
+		}
 		const inner = rest.slice(shape.open.length, rest.length - shape.close.length).trim();
-		const unquoted = inner.length >= 2 && inner.startsWith('"') && inner.endsWith('"') ? inner.slice(1, -1) : inner;
-		return { id, shape, text: unquoted };
+		if (!(inner.length >= 2 && inner.startsWith('"') && inner.endsWith('"'))) {
+			return { error: `节点 ${id} 的说明要用双引号括起来，写成 ${id}["…"]` };
+		}
+		return { id, shape, text: inner.slice(1, -1) };
 	}
 	return { error: `节点 ${id} 的括号不成对「${rest}」` };
 }
@@ -138,6 +153,9 @@ function parseLine(line) {
 		if (ref.error !== undefined) return { error: ref.error };
 		nodes.push(ref);
 		if (arrow === null) break;
+		if (arrow[1] !== PLAIN_ARROW) {
+			return { error: `只画 ${PLAIN_ARROW} 这一种箭头，收到「${arrow[1]}」` };
+		}
 		const label = (arrow[2] ?? '').trim();
 		arrows.push(label === '' ? { op: arrow[1] } : { op: arrow[1], when: label });
 		rest = rest.slice(at + arrow[0].length);
@@ -166,7 +184,9 @@ export function parseMermaid(source) {
 
 	lines.forEach((rawLine, index) => {
 		const lineNumber = index + 1;
-		const line = rawLine.replace(/%%.*$/, '').trim();
+		// `%%` starts a comment only at the start of a line: inside a quoted label it
+		// is just text, and cutting there turned a readable label into a parse error.
+		const line = rawLine.trim().startsWith('%%') ? '' : rawLine.trim();
 		if (line === '') return;
 		if (NOISE_RE.test(line)) return;
 
@@ -183,7 +203,7 @@ export function parseMermaid(source) {
 			errors.push(`第 ${lineNumber} 行: 第一行要是「flowchart LR」，它决定图的走向`);
 			direction = 'LR';
 		}
-		if (/^(?:subgraph|end)$/.test(line)) {
+		if (/^(?:subgraph\b|end$)/.test(line)) {
 			errors.push(`第 ${lineNumber} 行: 不支持 ${line.split(/\s/)[0]}；分层靠箭头，不靠子图分组`);
 			return;
 		}
@@ -212,24 +232,8 @@ export function parseMermaid(source) {
 					errors.push(`第 ${lineNumber} 行: 模块框的第一行要写它指向的图 id，收到「${module}」`);
 					continue;
 				}
-				if (ports.length === 0) {
-					errors.push(`第 ${lineNumber} 行: 模块框要写端口——至少一条进来的或出去的条件，否则读者不知道这个模块接在哪`);
-					continue;
-				}
-				ports.forEach((port, portIndex) => {
-					if (port === '') {
-						errors.push(`第 ${lineNumber} 行: 模块框第 ${portIndex + 1} 条端口是空的`);
-						return;
-					}
-					const problem = port.length > PORT_MAX_CHARS
-						? `第 ${lineNumber} 行 端口「${port}」: 超过 ${PORT_MAX_CHARS} 字符，端口写的是进出这件事的条件，一句话就够`
-						: labelProblem(port, `第 ${lineNumber} 行 端口「${port}」`);
-					if (problem !== undefined) errors.push(problem);
-				});
 				nodes.push({ id: ref.id, module, ports, line: lineNumber });
 			} else {
-				const problem = labelProblem(text, `第 ${lineNumber} 行 节点 ${ref.id}`);
-				if (problem !== undefined) errors.push(problem);
 				nodes.push({ id: ref.id, label: text, line: lineNumber });
 			}
 			declared.set(ref.id, { id: ref.id, line: lineNumber, label: text });
@@ -244,6 +248,9 @@ export function parseMermaid(source) {
 	});
 
 	if (direction === undefined) errors.push('这一块里没有「flowchart LR」，它不是一张流程图');
+	// The counts are a shape check, not a parse check: reporting them beside a line
+	// the parser already refused buries the one thing the writer has to fix.
+	if (errors.length > 0) return { ok: false, errors };
 	if (nodes.length < 2) errors.push('流程图至少两个节点');
 	if (edges.length === 0) errors.push('流程图至少一条连线——只有节点没有连线，就不是一条流程');
 	if (errors.length > 0) return { ok: false, errors };
@@ -275,9 +282,30 @@ export function validateGraph(graph, options = {}) {
 			if (known !== undefined && !known.has(node.module)) {
 				errors.push(`${where}: 图集里没有「${node.module}」这张图`);
 			}
+			const ports = Array.isArray(node.ports) ? node.ports : [];
+			// A module box is a door: without a port the reader cannot tell what
+			// condition walks through it, or what state is on the other side.
+			if (ports.length === 0) {
+				errors.push(`${where}: 模块框要写端口——至少一条进来的或出去的条件，否则读者不知道这个模块接在哪`);
+			}
+			ports.forEach((port, index) => {
+				const portWhere = `${where} 第 ${index + 1} 条端口`;
+				if (typeof port !== 'string' || port.trim() === '') {
+					errors.push(`${portWhere}: 不能为空`);
+					return;
+				}
+				if (port.length > PORT_MAX_CHARS) {
+					errors.push(`${portWhere}: 超过 ${PORT_MAX_CHARS} 字符，端口写的是进出这件事的条件，一句话就够`);
+					return;
+				}
+				const problem = labelProblem(port, portWhere);
+				if (problem !== undefined) errors.push(problem);
+			});
 			continue;
 		}
 		const label = node.label ?? '';
+		const problem = labelProblem(label, `${where} 节点 ${node.id}`);
+		if (problem !== undefined) errors.push(problem);
 		const owner = labelOwners.get(label);
 		if (label !== '' && owner !== undefined) {
 			errors.push(`${where}: 与 ${owner} 一字不差。两个框写同一句话，看图的人分不出谁是谁`);
@@ -321,6 +349,16 @@ export function validateGraph(graph, options = {}) {
 		}
 		if (branching.get(edge.from) === 1 && edge.when !== undefined) {
 			errors.push(`${where}: ${edge.from} 只有这一条出边，不是分叉，不用写条件——写上去像在说「还有别的走法」，图上却只有一根箭头`);
+		}
+		// A condition is read off the picture the same way a box is, so it answers
+		// to the same rules: a sentence about what happens, not why.
+		if (edge.when !== undefined) {
+			if (edge.when.length > WHEN_MAX_CHARS) {
+				errors.push(`${where}: 条件超过 ${WHEN_MAX_CHARS} 字符，条件只写凭什么走这条路`);
+			} else {
+				const problem = labelProblem(edge.when, `${where} 的条件「${edge.when}」`);
+				if (problem !== undefined) errors.push(problem);
+			}
 		}
 		if (edge.when === undefined) continue;
 		const key = `${edge.from}\u0000${edge.when}`;

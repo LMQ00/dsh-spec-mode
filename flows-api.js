@@ -48,6 +48,9 @@ export const MERMAID_ROUTE = `${FLOWS_ROUTE}/mermaid.js`;
 /** How much of a request body one call accepts, so a huge paste is refused early. */
 const BODY_LIMIT = 4 * 1024 * 1024;
 
+/** Every verb this route answers. */
+const KNOWN_VERBS = new Set(['list', 'chart', 'save', 'create', 'delete']);
+
 /** The two steps a newly created chart starts with. */
 const SEED_SOURCE = drawMermaid({
 	direction: 'LR',
@@ -224,8 +227,16 @@ export function registerFlowRoutes(ctx, deps) {
 				return;
 			}
 			// The same 3.4 MB for every page load: read it once per process and keep
-			// the header that says how long the browser may too.
-			mermaidCache ??= readFileSync(path);
+			// the header that says how long the browser may too. A path that is a
+			// directory or an unreadable file answers like a missing one instead of
+			// throwing out of the request handler.
+			try {
+				mermaidCache ??= readFileSync(path);
+			} catch {
+				res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+				res.end('没有找到 mermaid。装一个，或用 DSH_SPEC_MERMAID 指定 mermaid.min.js 的路径。');
+				return;
+			}
 			const body = mermaidCache;
 			res.writeHead(200, {
 				'content-type': 'application/javascript; charset=utf-8',
@@ -385,8 +396,24 @@ export function registerFlowRoutes(ctx, deps) {
 				return;
 			}
 
+				// A verb this route knows, called the wrong way round: the caller is
+				// holding the wrong method, not the wrong address.
+			if (KNOWN_VERBS.has(verb)) {
+				json(res, 405, { ok: false, code: 'no-method', message: `${verb} 不接受 ${req.method}` });
+				return;
+			}
 			json(res, 404, { ok: false, code: 'no-route', message: `没有这个接口：${verb || '/'}` });
 		} catch (error) {
+			// The two failures a caller can cause are named: a body that is not JSON is
+			// their mistake, and a body over the limit is not a server fault either.
+			if (error?.message === '请求太大') {
+				json(res, 413, { ok: false, code: 'too-large', message: `请求超过 ${BODY_LIMIT} 字节` });
+				return;
+			}
+			if (error instanceof SyntaxError) {
+				json(res, 400, { ok: false, code: 'bad-json', message: `请求体不是 JSON：${error.message}` });
+				return;
+			}
 			json(res, 500, { ok: false, code: 'failed', message: String(error?.message ?? error) });
 		}
 	};

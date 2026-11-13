@@ -483,6 +483,65 @@ check('the collection routes list, read, save, create and delete', async () => {
 	assert.equal(unknown._status, 404);
 });
 
+check('a landing keeps a brief it was not given, and refuses to write and delete one chart', async () => {
+	const dir = join(sandbox, 'inherit');
+	mkdirSync(join(dir, '.git'), { recursive: true });
+	const ctx = makeContext(dir, { answers: [approve, approve] });
+	ctx._state = { active: true, running: null, exitCall: null };
+	const tool = ctx._registered.tools[0].definition;
+	const agent = { session: session(dir) };
+	await tool.execute(goodArgs('first'), { agent, signal: undefined });
+
+	// The common edit: the diagram changed, the brief did not. Leaving `brief` out
+	// has to mean "keep the one on disk", not "clear it". A landed session has
+	// exited, so the second pass speaks as a fresh one — same project, new session.
+	const second = goodArgs('second');
+	second.charts[0].source = 'flowchart LR\n  n1["甲"]\n  n2["乙"]\n  n1 --> n2\n';
+	delete second.charts[0].brief;
+	await tool.execute(second, { agent: { session: session(dir) }, signal: undefined });
+	const kept = readFileSync(join(dir, '.spec', 'flows', 'overview.md'), 'utf8');
+	assert.ok(kept.includes('### 目标'), kept);
+	assert.ok(kept.includes('n1["甲"]'), kept);
+
+	// One id may not be both written and deleted: the result would depend on the
+	// order the two lists happen to be applied in.
+	const clash = goodArgs('clash');
+	let threw;
+	try {
+		await tool.execute({ charts: clash.charts, removed: ['overview'] }, { agent: { session: session(dir) }, signal: undefined });
+	} catch (error) {
+		threw = error;
+	}
+	assert.ok(threw !== undefined);
+	assert.ok(threw.message.includes('removed'), threw.message);
+});
+
+check('the routes answer with the status the mistake deserves', async () => {
+	const dir = join(sandbox, 'status');
+	mkdirSync(join(dir, '.git'), { recursive: true });
+	const ctx = makeContext(dir, { webServer: true });
+	const handler = ctx._registered.webServer.routes[0].handler;
+
+	// A body that is not JSON is the caller's mistake, not a server fault.
+	const broken = {
+		method: 'POST',
+		url: '/spec/flows/save?session=session-fake',
+		async *[Symbol.asyncIterator]() { yield Buffer.from('{ not json', 'utf8'); },
+	};
+	const badJson = fakeResponse();
+	await handler(broken, badJson);
+	assert.equal(badJson._status, 400, badJson._body);
+
+	// A verb this route knows, called the wrong way round.
+	const wrongMethod = fakeResponse();
+	await handler(fakeRequest('GET', '/spec/flows/save?session=session-fake'), wrongMethod);
+	assert.equal(wrongMethod._status, 405, wrongMethod._body);
+
+	const unknown = fakeResponse();
+	await handler(fakeRequest('GET', '/spec/flows/whatever?session=session-fake'), unknown);
+	assert.equal(unknown._status, 404, unknown._body);
+});
+
 check('the drawing library is served as a script', async () => {
 	const dir = join(sandbox, 'mermaid');
 	mkdirSync(join(dir, '.git'), { recursive: true });

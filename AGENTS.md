@@ -44,8 +44,8 @@
 ## 验证
 
 - 在仓库根目录跑 `npm test`（= `node selftest.mjs && node landing-test.mjs`），两套断言全过才算改完。
-- 只改纯逻辑模块时至少跑 `node selftest.mjs`（54 项）；碰了落盘、守卫、命令、提醒、源码解析或路由接线，
-  必须连 `node landing-test.mjs`（15 项）一起跑——它用假上下文驱动真实 apply()，纯逻辑套件到不了
+- 只改纯逻辑模块时至少跑 `node selftest.mjs`（58 项）；碰了落盘、守卫、命令、提醒、源码解析或路由接线，
+  必须连 `node landing-test.mjs`（17 项）一起跑——它用假上下文驱动真实 apply()，纯逻辑套件到不了
   execute。
 - 改了校验或图集后跑 `npm run flow`：它先校验再写盘，只写 `.md`；然后打开 `.spec/flows/overview.md`，在支持 mermaid 的预览里确认图能渲染。
 - 改了 `docs/` 后跑 `node /home/LMQ/.dsh/skills/docs-completion/scripts/check-docs.mjs --root .`，退出码 0 才算改完。

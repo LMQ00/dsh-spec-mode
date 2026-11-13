@@ -127,8 +127,8 @@ flowchart LR
 | `flows-api.js` | 提供 `/spec/flows` 下五个 JSON 接口与 mermaid 库路由给流程图页用 |
 | `client.js` | 流程图页：列图集、渲染或编辑源码、改简报、保存、新建、删除 |
 | `doc-flow.mjs` | 生成这个仓库自己的图集：`npm run flow`，只写 `.md` |
-| `selftest.mjs` | 纯逻辑断言：不启宿主也能跑的 54 项 |
-| `landing-test.mjs` | 用假上下文驱动真实 `apply()` 的 15 项接线断言 |
+| `selftest.mjs` | 纯逻辑断言：不启宿主也能跑的 58 项 |
+| `landing-test.mjs` | 用假上下文驱动真实 `apply()` 的 17 项接线断言 |
 
 ## 测试
 

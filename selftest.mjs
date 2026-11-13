@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { agentsMdAdvisories, deliverableAdvisories, progressAdvisories, specDeliverableWrite } from './advisories.js';
-import { parseBrief, renderBrief, validateBrief } from './brief.js';
+import { validateBrief } from './brief.js';
 import { canonicalMarkdown, chartPath, parseChartMarkdown, revisionOf } from './chart-md.js';
 import {
 	drawableChart,
@@ -205,21 +205,18 @@ const goodBrief = {
 	constraints: ['只支持 CSV。'],
 };
 
-check('a complete brief validates and renders its four sections', () => {
+check('a complete brief validates field by field', () => {
 	const outcome = validateBrief(goodBrief);
 	assert.equal(outcome.ok, true);
-	const text = renderBrief(outcome.brief);
-	assert.ok(text.startsWith('# 导出功能\n'));
-	for (const heading of ['## 目标', '## 要做什么', '## 验收', '## 约束']) assert.ok(text.includes(heading), `${heading} 缺失`);
-	assert.ok(text.endsWith('\n'));
+	assert.equal(outcome.brief.title, '导出功能');
+	assert.deepEqual(outcome.brief.requirements, goodBrief.requirements);
+	assert.deepEqual(outcome.brief.constraints, ['只支持 CSV。']);
 });
 
-check('an empty constraints list omits the section', () => {
+check('constraints are optional', () => {
 	const outcome = validateBrief({ ...goodBrief, constraints: [] });
 	assert.equal(outcome.ok, true);
-	const text = renderBrief(outcome.brief);
-	assert.equal(text.includes('## 约束'), false);
-	assert.ok(text.includes('## 验收'));
+	assert.deepEqual(outcome.brief.constraints, []);
 });
 
 check('a brief rejects missing and empty fields with a field path', () => {
@@ -304,13 +301,6 @@ check('a value that would read back as a heading is rejected', () => {
 	const requirement = validateBrief({ ...goodBrief, requirements: ['## 要做什么'] });
 	assert.equal(requirement.ok, false);
 	assert.ok(requirement.errors[0].includes('#'));
-});
-
-check('a rendered brief reads back into the same brief', () => {
-	const outcome = validateBrief(goodBrief);
-	const back = parseBrief(renderBrief(outcome.brief));
-	assert.equal(back.ok, true);
-	assert.deepEqual(back.brief, outcome.brief);
 });
 
 check('a hand-written brief is not held to the model shape', () => {
@@ -520,6 +510,61 @@ check('a diagram survives a round trip through its own writer', () => {
 		edges: [{ from: 'n1', to: 'n2' }],
 	});
 	assert.ok(moduleText.includes('n2[["landing<br/>入：甲<br/>出：乙"]]'), moduleText);
+});
+
+check('a file that would not read back as itself is refused', () => {
+	// The title is one line of the file and the scope is the paragraph under it: a
+	// newline in either moves the boundary the parser looks for, and the chart comes
+	// back with a different name — or not at all.
+	const newlineName = validateChart(chartOf({ name: '总\n览' }));
+	assert.equal(newlineName.ok, false);
+	assert.ok(newlineName.errors[0].includes('一行'), newlineName.errors.join('；'));
+
+	const fenceScope = validateChart(chartOf({ scope: '从甲\n```mermaid\n到乙' }));
+	assert.equal(fenceScope.ok, false);
+	assert.ok(fenceScope.errors.some((error) => error.includes('```')), fenceScope.errors.join('；'));
+
+	// A second `# ` inside the brief would give one document two names.
+	const ownTitle = validateChart(chartOf({ brief: '# 另一个标题\n\n### 目标\n甲。' }));
+	assert.equal(ownTitle.ok, false);
+	assert.ok(ownTitle.errors[0].includes('标题'), ownTitle.errors.join('；'));
+});
+
+check('a condition answers to the same rules as a box', () => {
+	const withWhen = (when) => validateChart(chartOf({
+		source: `flowchart LR\n  A["甲"]\n  B["乙"]\n  C["丙"]\n  A -->|${when}| B\n  A -->|别的| C\n`,
+	}));
+	assert.ok(withWhen('因为要落盘').errors.some((error) => error.includes('理由')), '理由');
+	assert.ok(withWhen('/home/someone/app').errors.some((error) => error.includes('绝对路径')), '绝对路径');
+	assert.ok(withWhen('通过'.repeat(30)).errors.some((error) => error.includes('条件超过')), '超长');
+	assert.equal(withWhen('校验通过').ok, true);
+});
+
+check('a chart id long enough to exist is long enough to be a box id', () => {
+	// The two limits are one limit: a module box names a chart, so the longest id a
+	// chart may have is the longest id a box may write.
+	const id = `a${'b'.repeat(23)}`;
+	assert.equal(id.length, 24);
+	const outcome = validateChart(chartOf({
+		id: 'land',
+		source: `flowchart LR\n  n1["甲"]\n  n2[["${id}<br/>入：乙"]]\n  n1 --> n2\n`,
+	}), { knownModules: new Set([id]) });
+	assert.equal(outcome.ok, true, JSON.stringify(outcome.errors));
+});
+
+check('a diagram with a line the parser refused does not also complain about counts', () => {
+	const outcome = validateChart(chartOf({ source: 'flowchart LR\n  subgraph 一组\n  end\n' }));
+	assert.equal(outcome.ok, false);
+	// The counts are a shape check on a diagram that parsed; saying "at least two
+	// nodes" next to a refused line buries the one thing to fix.
+	assert.equal(outcome.errors.some((error) => error.includes('至少')), false, outcome.errors.join('；'));
+	assert.ok(outcome.errors.some((error) => error.includes('subgraph')), outcome.errors.join('；'));
+});
+
+check('a diagram pasted from Windows loses its carriage returns', () => {
+	const outcome = validateChart(chartOf({ source: goodSource.replace(/\n/g, '\r\n') }));
+	assert.equal(outcome.ok, true, JSON.stringify(outcome.errors));
+	assert.equal(outcome.chart.source.includes('\r'), false);
 });
 
 /* ---- chart files ---- */

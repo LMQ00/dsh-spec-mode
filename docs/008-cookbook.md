@@ -71,7 +71,7 @@ check('a module port names which side it is on', () => {
 node selftest.mjs
 ```
 
-看到 `54 checks passed` 变成 `55 checks passed`。
+看到 `58 checks passed` 变成 `59 checks passed`。
 
 ## 4. 跑全套
 
@@ -79,7 +79,7 @@ node selftest.mjs
 npm test
 ```
 
-退出码 0：`55 checks passed` 与 `15 checks passed` 都出现。碰了路由或落盘接线时，15 项那一套才会拦到问题。
+退出码 0：`59 checks passed` 与 `17 checks passed` 都出现。碰了路由或落盘接线时，17 项那一套才会拦到问题。
 
 ## 5. 让仓库自己的图集过新规则
 

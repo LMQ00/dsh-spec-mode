@@ -146,8 +146,8 @@ flowchart LR
 
 ```sh
 npm test               # 两套一起跑
-node selftest.mjs      # 54 项：纯逻辑
-node landing-test.mjs  # 15 项：真实 apply() 接假上下文，跑一遍退出落盘
+node selftest.mjs      # 58 项：纯逻辑
+node landing-test.mjs  # 17 项：真实 apply() 接假上下文，跑一遍退出落盘
 npm run flow           # 重新生成 .spec/flows/ 下这个仓库自己的图集，只写 .md
 ```
 
