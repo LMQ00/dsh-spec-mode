@@ -23,41 +23,30 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { readFileSync, unlinkSync } from 'node:fs';
 
 import { agentsMdAdvisories, specDeliverableWrite } from './advisories.js';
-import { renderBrief, validateBrief } from './brief.js';
+import { validateBrief } from './brief.js';
 import {
-	MODULE,
-	OVERVIEW,
-	canonicalModel,
-	chartModelPath,
-	drawableChart,
+	chartPath,
 	ensureFlowsDir,
-	listChartIds,
+	kindOf,
 	parentsOf,
-	readChart,
-	readChartBrief,
 	readCollection,
 	removeChartFiles,
-	revisionOf,
 	validateChart,
 	validateCollection,
-	writeChartBrief,
-	writeChartModel,
+	writeChart,
 } from './flows.js';
-import { renderFlowSvg } from './flow-svg.js';
+import { registerFlowRoutes } from './flows-api.js';
 import { classifyTarget, extractTargetPaths, isDestructiveTool, isWriteTool } from './guard.js';
 import { pendingDraftNotice, specModeContext } from './prompt.js';
-import { rasterize, svgSize } from './rasterize.js';
-import { registerFlowRoutes } from './flows-api.js';
 import {
 	PROJECTION_KEY,
 	createSpecProjection,
 	draftHasContent,
 	ensureSpecDir,
 	resolveDraftPath,
-	resolveFlowsDir,
 	resolveSpecDir,
 } from './state.js';
 
@@ -98,9 +87,9 @@ const CONTEXT_SUMMARY_MAX_CHARS = 120;
 
 const EXIT_DESCRIPTION =
 	'访谈完成、且用户确认过整体回述后调用：先校验整册图集，再弹确认框，用户批准后落盘并退出 spec mode。'
-	+ '`charts` 是本次改动的图，每张自带 id、kind、name、scope、nodes、edges 与可选 brief——只写这些，'
+	+ '`charts` 是本次改动的图，每张自带 id、name、scope、source（mermaid 源码）与可选 brief——只写这些，'
 	+ '未提交的图原样留在盘上；`removed` 列出本次删掉的图 id，被引用的图不能删。'
-	+ '每张图落在 `.spec/flows/<id>.json`、`.spec/flows/<id>.png`、`.spec/flows/<id>.brief.md`。'
+	+ '每张图落在 `.spec/flows/<id>.md` 这一份文件里：标题、范围、mermaid 块、简报。'
 	+ '用户选「退出并落盘」→ 写这些文件、删掉草稿、退出模式、工作树恢复可写；'
 	+ '选「继续访谈」→ 模式不变、工作树仍只读，等用户补充需求后继续更新草稿。';
 
@@ -118,9 +107,17 @@ function texts(description) {
 	return { type: 'array', items: { type: 'string' }, description };
 }
 
+/** How a chart's mermaid source is written, in the words the model reads. */
+const SOURCE_DESCRIPTION =
+	'这张图的 mermaid 源码，整块就是文件里的图。'
+	+ '第一行 `flowchart LR`；节点一行一个，写 `n1["谁做了什么"]`；'
+	+ '模块框写 `n4[["check<br/>入：什么条件进来<br/>出：出去之后是什么状态"]]`，引号里第一行是被引用图的 id，后面每行一条端口；'
+	+ '箭头一行一条，写 `n1 --> n2`，分叉写成 `n1 -->|条件| n2`。'
+	+ '只允许一个起点；要重复的一步，用回箭头指回重来的那个框。';
+
 /**
- * The JSON Schema for one chart's nodes and edges, shared by every tool that
- * takes a chart so a chart means the same thing wherever it is submitted.
+ * The JSON Schema for one chart, shared by every tool that takes a chart so a
+ * chart means the same thing wherever it is submitted.
  * @returns {Record<string, unknown>} the parameters.
  */
 function chartShape() {
@@ -128,46 +125,13 @@ function chartShape() {
 		type: 'object',
 		additionalProperties: false,
 		properties: {
-			id: text('这张图的编号，也是文件名：小写字母开头，只用小写字母、数字与短横，最长 24 位。一经落盘不再改名。'),
-			kind: text(`"${OVERVIEW}" 是产品全貌，整册只能有一张；"${MODULE}" 是被别的图引用的模块图。`),
-			name: text('显示名，画在框上，说明这张图现在负责什么。作用变了就改它。'),
+			id: text('这张图的编号，也是文件名：小写字母开头，只用小写字母、数字与短横，最长 24 位。一经落盘不再改名。id 为 overview 的那张就是产品全貌，整册恰好一张。'),
+			name: text('显示名，写进文件第一行，也画在引用它的模块框上。作用变了就改它。'),
 			scope: text('一行写死这张图从哪一步到哪一步。写「本次」「相关」这类无边界说法会被拒。'),
-			nodes: {
-				type: 'array',
-				description: '至少两个。普通节点写 { id, label }；模块节点写 { id, module, ports }。',
-				items: {
-					type: 'object',
-					additionalProperties: false,
-					properties: {
-						id: text('短标识，字母开头，字母数字下划线与短横，全图唯一。'),
-						label: text('谁做了什么，日常说法；画进图里就是这个框的字。模块节点不要写。'),
-						module: text('模块节点专用：指向另一张图的 id。'),
-						ports: {
-							type: 'array',
-							items: { type: 'string' },
-							description: '模块节点必填，至少一条：这个模块接进来需要什么条件、出去之后进入什么状态。',
-						},
-					},
-					required: ['id'],
-				},
-			},
-			edges: {
-				type: 'array',
-				description: '图里的箭头。两端必须已声明为节点。要重复的一步用回箭头指回它重来的框。只允许一个起点。',
-				items: {
-					type: 'object',
-					additionalProperties: false,
-					properties: {
-						from: text('起点节点 id。'),
-						to: text('终点节点 id。'),
-						when: text('可选。但一个节点有两条以上出边时，每条出边都必须写：分叉条件只存在于图上。'),
-					},
-					required: ['from', 'to'],
-				},
-			},
-			brief: text('可选。这张图对应的一份需求简报，Markdown，形状同 brief.md 的四节。人不写就留空，模型在访谈里补。'),
+			source: text(SOURCE_DESCRIPTION),
+			brief: text('可选。这张图的需求简报，Markdown，四节：### 目标、### 要做什么、### 验收、### 约束。人不写就留空，模型在访谈里补。'),
 		},
-		required: ['id', 'kind', 'name', 'scope', 'nodes', 'edges'],
+		required: ['id', 'name', 'scope', 'source'],
 	};
 }
 
@@ -180,7 +144,7 @@ function chartShape() {
  * rejected by the provider.
  *
  * The content rules JSON Schema cannot express (no code, no reasoning, no local
- * paths) live in `flows.js` and `flow.js`.
+ * paths) live in `flows.js` and `mermaid-graph.js`.
  *
  * @returns {Record<string, unknown>} the parameter schema.
  */
@@ -267,46 +231,6 @@ function writeProduct(filePath, content) {
 	} catch (error) {
 		throw new Error(`落盘失败（${filePath}）：${error?.message ?? error}。产物未写完，草稿保留，修正后重新调用。`);
 	}
-}
-
-/**
- * Draw one chart and write its picture beside it. The SVG is written first and
- * rasterized after; a machine with no renderer keeps the SVG, which the preview
- * still shows.
- *
- * @param {string} specDir - the absolute `.spec` directory.
- * @param {string} flowsDir - the absolute chart collection directory.
- * @param {object} model - the validated chart.
- * @param {Map<string, object>} models - every chart, for the module boxes' names.
- * @returns {Promise<{ path: string, format: string }>} what was written.
- */
-async function drawChart(specDir, flowsDir, model, models) {
-	const svg = renderFlowSvg(drawableChart(model, models), `${model.name}：功能流程`);
-	const vectorPath = chartModelPath(specDir, model.id).replace(/\.json$/, '.svg');
-	const imagePath = chartModelPath(specDir, model.id).replace(/\.json$/, '.png');
-	writeProduct(vectorPath, svg);
-	const renderer = await rasterize(vectorPath, imagePath, svgSize(svg) ?? { width: 640, height: 480 });
-	if (renderer === undefined) return { path: vectorPath, format: 'SVG（本机没有可用的转换器，预览照样能显示）' };
-	try {
-		unlinkSync(vectorPath);
-	} catch {
-		// Leaving the SVG behind costs nothing but a stray file.
-	}
-	return { path: imagePath, format: `PNG，由 ${renderer} 转换` };
-}
-
-/**
- * The charts a landing has to redraw: the ones it wrote, plus every chart that
- * points at one of them — a module box shows the target's name, so renaming a
- * chart changes its parents' pictures without changing their models.
- * @param {string[]} written - the ids this landing wrote.
- * @param {Map<string, object>} models - every chart after the write.
- * @returns {string[]} the ids to redraw, in a stable order.
- */
-function chartsToRedraw(written, models) {
-	const dirty = new Set(written);
-	for (const id of written) for (const parent of parentsOf(models, id)) dirty.add(parent);
-	return [...dirty].sort();
 }
 
 /* ------------------------------------------------------------------ */
@@ -415,7 +339,7 @@ export function apply(ctx) {
 		commandCtx.commands.register({
 			definitionId: 'dsh-spec-mode',
 			name: COMMAND_NAME,
-			description: 'Spec mode: 访谈式需求固化 — 增量写草稿，工作树只读，退出后落盘 .spec/flows/ 图集（每张图一份 JSON 模型、一份 PNG、一份需求简报），并更新 AGENTS.md',
+			description: 'Spec mode: 访谈式需求固化 — 增量写草稿，工作树只读，退出后落盘 .spec/flows/ 图集（每张图一份 Markdown：mermaid 图与需求简报），并更新 AGENTS.md',
 			input: { hint: '[off|初始想法]', attachments: true },
 			handler: ({ agent, rawInput, attachments }) => {
 				const session = agent.session;
@@ -426,7 +350,7 @@ export function apply(ctx) {
 					if (!loggedActive(session)) return { kind: 'success', text: 'Spec mode 未开启。' };
 					agent.inject(
 						noticeMessage(
-							'用户退出了 spec mode，工作树恢复可写。现在按图集的形状自己写 .spec/flows/：每张图 `<id>.json` 模型、`<id>.png` 图、`<id>.brief.md` 简报，恰好一张 kind 为 overview，重试画成回箭头；然后用 flow_write 或直接写文件，删掉草稿，再更新 AGENTS.md。',
+							'用户退出了 spec mode，工作树恢复可写。现在按图集的形状自己写 .spec/flows/：每张图一份 `<id>.md`——标题、范围、mermaid 块、简报，id 为 overview 的那张是产品全貌，重试画成回箭头；然后用 flow_write 或直接写文件，删掉草稿，再更新 AGENTS.md。',
 							'Spec mode off',
 						),
 					);
@@ -493,12 +417,10 @@ export function apply(ctx) {
 							additionalProperties: false,
 							properties: {
 								id: { type: 'string' },
-								model: { type: 'string' },
-								picture: { type: 'string' },
-								format: { type: 'string' },
+								path: { type: 'string' },
 								brief: { type: 'string' },
 							},
-							required: ['id', 'model', 'picture', 'format', 'brief'],
+							required: ['id', 'path', 'brief'],
 						},
 					},
 					removed: { type: 'array', items: { type: 'string' } },
@@ -511,7 +433,7 @@ export function apply(ctx) {
 					type: 'text',
 					text:
 						`已退出 spec mode，工作树可写。图集已落盘：\n`
-						+ value.charts.map((chart) => `- ${chart.id}：${chart.model}｜${chart.picture}（${chart.format}）`).join('\n')
+						+ value.charts.map((chart) => `- ${chart.id}：${chart.path}（简报：${chart.brief}）`).join('\n')
 						+ (value.removed.length > 0 ? `\n- 删掉：${value.removed.join('、')}` : '')
 						+ (value.warnings.length > 0 ? `\n\n提醒：\n${value.warnings.map((line) => `- ${line}`).join('\n')}` : '')
 						+ '\n\n现在只剩一步：写 AGENTS.md —— 只放文档索引（指向 `.spec/flows/` 与本仓库的文档）'
@@ -532,7 +454,6 @@ export function apply(ctx) {
 
 			const cwd = sessionCwd(session);
 			const specDir = resolveSpecDir(cwd);
-			const flowsDir = resolveFlowsDir(cwd);
 			const removed = Array.isArray(args?.removed) ? args.removed.map((id) => String(id).trim()).filter((id) => id !== '') : [];
 			const submitted = Array.isArray(args?.charts) ? args.charts : [];
 
@@ -541,8 +462,8 @@ export function apply(ctx) {
 			// collection is what the new charts are merged into, so a chart may point
 			// at a module this landing does not touch.
 			const { charts: existing, problems } = readCollection(specDir);
-			const models = new Map([...existing].map(([id, chart]) => [id, chart.model]));
-			const known = new Set([...models.keys(), ...submitted.map((chart) => (typeof chart?.id === 'string' ? chart.id.trim() : ''))]);
+			const entries = new Map(existing);
+			const known = new Set([...entries.keys(), ...submitted.map((chart) => (typeof chart?.id === 'string' ? chart.id.trim() : ''))]);
 
 			const errors = [...problems];
 			const written = [];
@@ -553,23 +474,23 @@ export function apply(ctx) {
 					errors.push(...outcome.errors.map((error) => `charts[${index}] ${error}`));
 					continue;
 				}
-				if (models.has(outcome.model.id) && submitted.filter((chart) => chart?.id === outcome.model.id).length > 1) {
-					errors.push(`charts[${index}].id: 同一次提交里出现了两张「${outcome.model.id}」`);
+				if (entries.has(outcome.chart.id) && submitted.filter((chart) => chart?.id === outcome.chart.id).length > 1) {
+					errors.push(`charts[${index}].id: 同一次提交里出现了两张「${outcome.chart.id}」`);
 				}
-				models.set(outcome.model.id, outcome.model);
-				written.push(outcome.model.id);
-				if (typeof raw.brief === 'string' && raw.brief.trim() !== '') briefs.set(outcome.model.id, raw.brief);
+				entries.set(outcome.chart.id, { chart: outcome.chart, graph: outcome.graph, revision: '' });
+				written.push(outcome.chart.id);
+				if (typeof raw.brief === 'string' && raw.brief.trim() !== '') briefs.set(outcome.chart.id, raw.brief);
 			}
-			for (const id of removed) if (models.has(id)) models.delete(id);
+			for (const id of removed) if (entries.has(id)) entries.delete(id);
 
-			const collection = validateCollection(models, { removed });
+			const collection = validateCollection(entries, { removed });
 			errors.push(...collection.errors);
 			if (errors.length > 0) throw repairError(EXIT_TOOL_NAME, errors);
 
 			const briefErrors = [];
 			for (const [id, brief] of briefs) {
-				const outcome = validateBrief(parseBriefSections(brief));
-				if (!outcome.ok) briefErrors.push(...outcome.errors.map((error) => `${id}.brief ${error}`));
+				const outcome = validateBrief(sectionsOf(brief, entries.get(id)?.chart.name));
+				if (!outcome.ok) briefErrors.push(...outcome.errors.map((error) => `${id} 的简报 ${error}`));
 			}
 			if (briefErrors.length > 0) throw repairError(EXIT_TOOL_NAME, briefErrors);
 
@@ -583,10 +504,11 @@ export function apply(ctx) {
 			// The review shows every box that will be on every picture, because that
 			// is the one thing a person cannot check from the chart's JSON.
 			const summary = written.map((id) => {
-				const model = models.get(id);
-				const chart = drawableChart(model, models);
-				return `== ${model.name}（${id}，${model.kind}）==\n${model.scope}\n`
-					+ chart.nodes.map((node) => `- ${node.label}${node.isModule ? '（模块）' : ''}`).join('\n');
+				const entry = entries.get(id);
+				const lines = entry.graph.nodes.map((node) => (typeof node.module === 'string'
+					? `- （模块）${node.module}：${entries.get(node.module)?.chart?.name ?? '缺图'}`
+					: `- ${node.label}`));
+				return `== ${entry.chart.name}（${id}）==\n${entry.chart.scope}\n${lines.join('\n')}`;
 			}).join('\n\n');
 
 			const answer = await interaction
@@ -636,23 +558,12 @@ export function apply(ctx) {
 
 			ensureSpecDir(specDir);
 			ensureFlowsDir(specDir);
+			const landed = new Map();
 			for (const id of written) {
-				writeChartModel(specDir, models.get(id));
-				if (briefs.has(id)) writeChartBrief(specDir, id, briefs.get(id));
+				const brief = briefs.has(id) ? briefs.get(id) : entries.get(id).chart.brief;
+				landed.set(id, writeChart(specDir, { ...entries.get(id).chart, brief }));
 			}
 			for (const id of removed) removeChartFiles(specDir, id);
-
-			// A module box shows the target chart's name, so a rename also changes the
-			// parents' pictures. Redrawing them keeps the PNG from going stale against
-			// the model it was drawn from.
-			const redraw = chartsToRedraw(written, models);
-			const landed = new Map();
-			for (const id of redraw) {
-				const model = models.get(id);
-				if (model === undefined) continue;
-				const picture = await drawChart(specDir, flowsDir, model, models);
-				landed.set(id, picture);
-			}
 
 			try {
 				unlinkSync(resolveDraftPath(cwd));
@@ -664,10 +575,8 @@ export function apply(ctx) {
 				exited: true,
 				charts: written.map((id) => ({
 					id,
-					model: chartModelPath(specDir, id),
-					picture: landed.get(id)?.path ?? chartModelPath(specDir, id).replace(/\.json$/, '.png'),
-					format: landed.get(id)?.format ?? 'PNG',
-					brief: readChartBrief(specDir, id) === '' ? '（还没写）' : `${id}.brief.md`,
+					path: landed.get(id)?.path ?? chartPath(specDir, id),
+					brief: (briefs.get(id) ?? entries.get(id).chart.brief).trim() === '' ? '（还没写）' : '已写',
 				})),
 				removed,
 				warnings: collection.warnings,
@@ -680,7 +589,7 @@ export function apply(ctx) {
 	ctx.tools.register({
 		name: READ_TOOL_NAME,
 		description:
-			'读 .spec/flows/ 这一册流程图：有哪些图、谁引用谁、每张图的模型与简报。不带 id 时返回清单；带 id 时返回那张图的完整模型。'
+			'读 .spec/flows/ 这一册流程图：有哪些图、谁引用谁、每张图的 mermaid 源码与简报。不带 id 时返回清单；带 id 时返回那份文件的全文。'
 			+ '不在 spec mode 时也能用；它只读，不改盘上任何东西。',
 		parameters: {
 			type: 'object',
@@ -711,8 +620,8 @@ export function apply(ctx) {
 							+ value.charts.map((chart) => `- ${chart.id}（${chart.kind}，${chart.revision}）：${chart.name}｜${chart.scope}${chart.parents.length > 0 ? `｜被 ${chart.parents.join('、')} 引用` : ''}`).join('\n')
 							+ (value.problems.length > 0 ? `\n读不出来的文件：\n${value.problems.map((line) => `- ${line}`).join('\n')}` : '')
 						: `== ${value.chart.id}（${value.chart.kind}，${value.revision}）==\n${value.chart.name}\n${value.chart.scope}\n\n`
-							+ JSON.stringify({ nodes: value.chart.nodes, edges: value.chart.edges }, null, 2)
-							+ (value.brief === '' ? '\n\n（这张图还没有简报）' : `\n\n== brief ==\n${value.brief}`),
+							+ `\`\`\`mermaid\n${value.chart.source.trimEnd()}\n\`\`\``
+							+ (value.brief === '' ? '\n\n（这张图还没有简报）' : `\n\n== 简报 ==\n${value.brief}`),
 				},
 			],
 		},
@@ -720,27 +629,26 @@ export function apply(ctx) {
 			const cwd = sessionCwd(exec.agent?.session ?? {});
 			const specDir = resolveSpecDir(cwd);
 			const { charts, problems } = readCollection(specDir);
-			const models = new Map([...charts].map(([id, chart]) => [id, chart.model]));
-			const listing = [...charts.values()].map((chart) => ({
-				id: chart.model.id,
-				kind: chart.model.kind,
-				name: chart.model.name,
-				scope: chart.model.scope,
-				revision: chart.revision,
-				parents: parentsOf(models, chart.model.id),
+			const listing = [...charts.values()].map((entry) => ({
+				id: entry.chart.id,
+				kind: kindOf(entry.chart.id),
+				name: entry.chart.name,
+				scope: entry.chart.scope,
+				revision: entry.revision,
+				parents: parentsOf(charts, entry.chart.id),
 			}));
 			const id = typeof args?.id === 'string' ? args.id.trim() : '';
 			if (id === '') return { charts: listing, problems };
-			const chart = charts.get(id);
-			if (chart === undefined) {
+			const entry = charts.get(id);
+			if (entry === undefined) {
 				throw new Error(`图集里没有「${id}」。现有：${[...charts.keys()].join('、') || '（空）'}`);
 			}
 			return {
 				charts: listing,
 				problems,
-				chart: { id, kind: chart.model.kind, name: chart.model.name, scope: chart.model.scope, nodes: chart.model.nodes, edges: chart.model.edges },
-				revision: chart.revision,
-				brief: readChartBrief(specDir, id),
+				chart: { id, kind: kindOf(id), name: entry.chart.name, scope: entry.chart.scope, source: entry.chart.source },
+				revision: entry.revision,
+				brief: entry.chart.brief,
 			};
 		},
 	});
@@ -748,7 +656,7 @@ export function apply(ctx) {
 	ctx.tools.register({
 		name: WRITE_TOOL_NAME,
 		description:
-			'改 .spec/flows/ 里的一张图：提交它的完整模型与可选简报，校验通过才写盘并重画。'
+			'改 .spec/flows/ 里的一张图：提交它的完整内容与可选简报，校验通过才写盘。'
 			+ '不在 spec mode 时也能用；spec mode 开着时不行——那时图集只能走 spec_resolve 的确认框。'
 			+ '传 revision 可以要求盘上仍是那一版，不一致就报冲突而不是覆盖。',
 		parameters: {
@@ -767,16 +675,15 @@ export function apply(ctx) {
 				properties: {
 					id: { type: 'string' },
 					revision: { type: 'string' },
-					picture: { type: 'string' },
-					format: { type: 'string' },
+					path: { type: 'string' },
 					warnings: { type: 'array', items: { type: 'string' } },
 				},
-				required: ['id', 'revision', 'picture', 'format', 'warnings'],
+				required: ['id', 'revision', 'path', 'warnings'],
 			},
 			render: (_args, value) => [
 				{
 					type: 'text',
-					text: `已写 ${value.id}（revision ${value.revision}），图已重画：${value.picture}（${value.format}）`
+					text: `已写 ${value.id}（revision ${value.revision}）：${value.path}`
 						+ (value.warnings.length > 0 ? `\n\n提醒：\n${value.warnings.map((line) => `- ${line}`).join('\n')}` : ''),
 				},
 			],
@@ -790,54 +697,38 @@ export function apply(ctx) {
 			}
 			const cwd = sessionCwd(session ?? {});
 			const specDir = resolveSpecDir(cwd);
-			const flowsDir = resolveFlowsDir(cwd);
 			const { charts: existing, problems } = readCollection(specDir);
-			const models = new Map([...existing].map(([id, chart]) => [id, chart.model]));
 
 			const outgoing = args?.chart;
 			const candidateId = typeof outgoing?.id === 'string' ? outgoing.id.trim() : '';
-			const known = new Set([...models.keys(), candidateId]);
+			const known = new Set([...existing.keys(), candidateId]);
 			const outcome = validateChart(outgoing, { knownModules: known });
 			if (!outcome.ok) throw repairError(WRITE_TOOL_NAME, [...problems, ...outcome.errors]);
 
-			const current = existing.get(outcome.model.id);
-			if (current === undefined && models.size > 0) {
-				// A brand-new chart may be added at any time; it just has to leave the
-				// collection valid, which the checks below prove.
-				models.set(outcome.model.id, outcome.model);
-			} else if (current !== undefined) {
-				const expected = typeof args?.revision === 'string' ? args.revision.trim() : '';
-				if (expected !== '' && expected !== current.revision) {
-					throw new Error(
-						`${outcome.model.id} 在盘上已经变了（盘上 ${current.revision}，你手上 ${expected}）：`
-						+ '先 flow_read 重新读一遍再改，别用旧版本覆盖。',
-					);
-				}
-				models.set(outcome.model.id, outcome.model);
-			} else {
-				models.set(outcome.model.id, outcome.model);
+			// A brand-new chart may be added at any time; an existing one is only
+			// overwritten when the caller saw the revision currently on disk.
+			const current = existing.get(outcome.chart.id);
+			const expected = typeof args?.revision === 'string' ? args.revision.trim() : '';
+			if (current !== undefined && expected !== '' && expected !== current.revision) {
+				throw new Error(
+					`${outcome.chart.id} 在盘上已经变了（盘上 ${current.revision}，你手上 ${expected}）：`
+					+ '先 flow_read 重新读一遍再改，别用旧版本覆盖。',
+				);
 			}
+			existing.set(outcome.chart.id, { chart: outcome.chart, graph: outcome.graph, revision: current?.revision ?? '' });
 
-			const collection = validateCollection(models);
+			const collection = validateCollection(existing);
 			if (collection.errors.length > 0) throw repairError(WRITE_TOOL_NAME, collection.errors);
 
 			const brief = typeof outgoing?.brief === 'string' ? outgoing.brief : undefined;
 			if (brief !== undefined && brief.trim() !== '') {
-				const briefOutcome = validateBrief(parseBriefSections(brief));
+				const briefOutcome = validateBrief(sectionsOf(brief, outcome.chart.name));
 				if (!briefOutcome.ok) throw repairError(WRITE_TOOL_NAME, briefOutcome.errors.map((error) => `chart.brief ${error}`));
 			}
 
 			ensureFlowsDir(specDir);
-			const modelPath = chartModelPath(specDir, outcome.model.id);
-			writeProduct(modelPath, canonicalModel(outcome.model));
-			if (brief !== undefined) writeChartBrief(specDir, outcome.model.id, brief);
-
-			const picture = await drawChart(specDir, flowsDir, outcome.model, models);
-			// The parents' boxes show this chart's name, so they have to be redrawn too.
-			for (const parent of parentsOf(models, outcome.model.id)) {
-				await drawChart(specDir, flowsDir, models.get(parent), models);
-			}
-			return { id: outcome.model.id, revision: revisionOf(outcome.model), picture: picture.path, format: picture.format, warnings: collection.warnings };
+			const written = writeChart(specDir, outcome.chart);
+			return { id: outcome.chart.id, revision: written.revision, path: written.path, warnings: collection.warnings };
 		},
 	});
 
@@ -846,14 +737,6 @@ export function apply(ctx) {
 	ctx.inject(['webServer', 'connection'], (webCtx) => {
 		registerFlowRoutes(webCtx, {
 			specDirOf: (session) => resolveSpecDir(sessionCwd(session)),
-			sessionCwd,
-			redraw: async (specDir, models, id) => {
-				const picture = await drawChart(specDir, resolveFlowsDir(specDir), models.get(id), models);
-				for (const parent of parentsOf(models, id)) {
-					await drawChart(specDir, resolveFlowsDir(specDir), models.get(parent), models);
-				}
-				return picture;
-			},
 		});
 	});
 
@@ -933,13 +816,26 @@ export function apply(ctx) {
  * @param {string} content - the Markdown brief.
  * @returns {object} the four-section object.
  */
+/**
+ * The four sections of a brief, with the chart's own title filling in for one the
+ * brief does not repeat: the brief lives inside the chart's file, which already
+ * starts with that title.
+ * @param {string} content - the brief body.
+ * @param {string} [title] - the chart's title.
+ * @returns {object} the sections `validateBrief` takes.
+ */
+function sectionsOf(content, title) {
+	const sections = parseBriefSections(content);
+	return sections.title === '' && typeof title === 'string' ? { ...sections, title } : sections;
+}
+
 function parseBriefSections(content) {
 	const lines = String(content).replace(/\r\n/g, '\n').split('\n');
 	const title = lines.map((line) => /^#\s+(.+?)\s*$/.exec(line)).find((match) => match !== null);
 	const sections = new Map();
 	let current = null;
 	for (const raw of lines) {
-		const heading = /^##\s+(.+?)\s*$/.exec(raw);
+		const heading = /^#{2,3}\s+(.+?)\s*$/.exec(raw);
 		if (heading !== null) {
 			current = heading[1].replace(/[：:]\s*$/, '');
 			sections.set(current, []);
@@ -954,7 +850,7 @@ function parseBriefSections(content) {
 	const paragraph = (name) => (sections.get(name) ?? []).map((line) => line.trim()).filter((line) => line !== '').join(' ');
 	const constraints = bullets('约束');
 	return {
-		title: title === null ? '' : title[1],
+		title: title == null ? '' : title[1],
 		goal: paragraph('目标'),
 		requirements: bullets('要做什么'),
 		acceptance: bullets('验收'),

@@ -1,7 +1,7 @@
 /**
  * Advisory-only checks for a spec-mode deliverable write: `AGENTS.md`. The charts
- * and their briefs are written by the plugin's own tools, which validate what
- * they write, so there is nothing for a write-time check to inspect there.
+ * are written by the plugin's own tools, which validate what they write, so the
+ * only deliverable a write-time check has anything to say about is the rule file.
  *
  * Nothing here blocks a write. `@deepseek-ai/dsh-agent-instructions` reads
  * `AGENTS.md` as a byte-budgeted baseline when the deployment composes it, so an
@@ -63,10 +63,10 @@ function writeTarget(args) {
 
 /**
  * Whether one tool call is a successful write of a spec-mode deliverable.
- * `AGENTS.md` counts wherever it lives (that is where the host reads it from);
- * a Markdown file counts as a product when it sits inside a `.spec` directory
- * and carries one of the two product names. The interview draft is a `.spec`
- * file too — the caller excludes it.
+ * `AGENTS.md` counts wherever it lives, which is where the host reads it from.
+ * The charts are markdown files too, and a person may edit one by hand — they
+ * are not held to the brief shape, so a write there is not this function's
+ * business.
  *
  * @param {string} toolName - the model-facing tool name.
  * @param {unknown} args - the parsed tool arguments.

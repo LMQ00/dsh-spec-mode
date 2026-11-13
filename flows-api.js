@@ -1,10 +1,10 @@
 /**
  * The chart collection over HTTP, for the conversation view.
  *
- * The view needs four things the Host owns: which charts exist, one chart's model
- * plus the SVG drawn from it, and the ability to save, create and delete. All of
- * them run through the same validators a landing uses — the view never decides
- * whether a chart is acceptable, it only shows what the Host says.
+ * The view needs four things the Host owns: which charts exist, one chart's
+ * markdown plus the mermaid it draws, and the ability to save, create and delete.
+ * All of them run through the same validators a landing uses — the view never
+ * decides whether a chart is acceptable, it only shows what the Host says.
  *
  * Two rules make this safe enough to be a plain route rather than a service:
  *
@@ -16,35 +16,47 @@
  *   cannot silently overwrite a landing or a model's edit.
  *
  * Routes live under one prefix so the whole surface is visible in one place:
- * `/spec/flows/<verb>`.
+ * `/spec/flows/<verb>`. The one exception is `mermaid.js`, the drawing library
+ * the page loads as a script.
  *
  * @module dsh-spec-mode/flows-api
  */
 
+import { createRequire } from 'node:module';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+
 import {
 	drawableChart,
-	ensureFlowsDir,
+	kindOf,
 	parentsOf,
-	readChartBrief,
 	readCollection,
 	removeChartFiles,
-	revisionOf,
 	validateChart,
 	validateCollection,
-	writeChartBrief,
-	writeChartModel,
+	writeChart,
 } from './flows.js';
-import { renderFlowSvg } from './flow-svg.js';
+import { drawMermaid } from './mermaid-graph.js';
 
 /** The route prefix this module owns. */
 export const FLOWS_ROUTE = '/spec/flows';
+
+/** Where the page loads the drawing library from. */
+export const MERMAID_ROUTE = `${FLOWS_ROUTE}/mermaid.js`;
 
 /** How much of a request body one call accepts, so a huge paste is refused early. */
 const BODY_LIMIT = 4 * 1024 * 1024;
 
 /** The two steps a newly created chart starts with. */
-const SEED_NODES = [{ id: 'n1', label: '第一步' }, { id: 'n2', label: '第二步' }];
-const SEED_EDGES = [{ from: 'n1', to: 'n2' }];
+const SEED_SOURCE = drawMermaid({
+	direction: 'LR',
+	nodes: [
+		{ id: 'n1', label: '第一步' },
+		{ id: 'n2', label: '第二步' },
+	],
+	edges: [{ from: 'n1', to: 'n2' }],
+});
 
 /**
  * Send one JSON response.
@@ -79,17 +91,59 @@ async function readBody(req) {
 }
 
 /**
+ * Where the drawing library sits on this machine.
+ *
+ * The plugin ships no copy of its own: mermaid is a browser library of several
+ * megabytes, and every install already has one beside the plugins that draw
+ * markdown. The first path that exists wins, so a project that keeps mermaid
+ * somewhere unusual can name it once in `DSH_SPEC_MERMAID`.
+ *
+ * @returns {string | undefined} the absolute path, or `undefined` when absent.
+ */
+export function mermaidAssetPath() {
+	const named = process.env.DSH_SPEC_MERMAID;
+	if (typeof named === 'string' && named !== '' && existsSync(named)) return named;
+	const relative = join('node_modules', 'mermaid', 'dist', 'mermaid.min.js');
+	const parents = [];
+	// The plugin's own directory, then every directory above it: a package manager
+	// that hoists dependencies lands on one of these.
+	let at = dirname(new URL(import.meta.url).pathname);
+	while (at !== '/' && parents.length < 8) {
+		parents.push(at);
+		at = dirname(at);
+	}
+	parents.push(homedir());
+	const candidates = parents.map((base) => join(base, relative));
+	// Every profile keeps its own node_modules; the library is installed once per
+	// profile, and the plugin runs under whichever profile loaded it.
+	try {
+		const profiles = join(homedir(), '.dsh', 'profiles');
+		for (const name of readdirSync(profiles)) candidates.push(join(profiles, name, relative));
+	} catch {
+		// No profiles directory: the other candidates still apply.
+	}
+	for (const candidate of candidates) {
+		if (existsSync(candidate)) return candidate;
+	}
+	try {
+		return createRequire(import.meta.url).resolve('mermaid/dist/mermaid.min.js');
+	} catch {
+		return undefined;
+	}
+}
+
+/**
  * Register the collection routes.
  *
  * @param {object} ctx - the plugin context, already carrying `webServer` and `connection`.
- * @param {{
- *   specDirOf: (session: object) => string,
- *   redraw: (specDir: string, models: Map<string, object>, id: string) => Promise<{ path: string }>,
- * }} deps - what the routes need from the plugin.
+ * @param {{ specDirOf: (session: object) => string }} deps - what the routes need from the plugin.
  * @returns {() => void} the disposer.
  */
 export function registerFlowRoutes(ctx, deps) {
 	const fence = (req) => ctx.connection.requestRejection(req) === undefined;
+
+	/** The drawing library, read once and kept for the life of the process. */
+	let mermaidCache;
 
 	/**
 	 * Resolve the session one request speaks for. The view always sends its own
@@ -98,65 +152,95 @@ export function registerFlowRoutes(ctx, deps) {
 	 * @returns {object | undefined} the session.
 	 */
 	function sessionOf(url) {
-		const id = url.searchParams.get('session') ?? '';
-		if (id === '') return undefined;
-		try {
-			// An agent only exists while its Session is running; a Session the reader
-			// has merely opened is live in the store but has no agent. Asking the agent
-			// registry alone therefore answered "找不到这个会话" for every finished
-			// conversation, which is exactly when a reader goes back to fix a chart.
-			const live = ctx.get('sessions')?.get(id) ?? ctx.get('agents')?.get(id)?.session;
-			return live;
-		} catch {
-			return undefined;
+		const raw = url.searchParams.get('session') ?? '';
+		if (raw === '') return undefined;
+		// The view slot hands the page a session id; whether that carries the
+		// `session-` prefix depends on where the conversation came from, so both
+		// spellings are tried before saying the session is gone.
+		const candidates = raw.startsWith('session-') ? [raw, raw.slice('session-'.length)] : [raw, `session-${raw}`];
+		for (const id of candidates) {
+			if (id === '') continue;
+			try {
+				// An agent only exists while its Session is running; a Session the reader
+				// has merely opened is live in the store but has no agent. Asking the agent
+				// registry alone therefore answered "找不到这个会话" for every finished
+				// conversation, which is exactly when a reader goes back to fix a chart.
+				const found = ctx.get('sessions')?.get(id) ?? ctx.get('agents')?.get(id)?.session;
+				if (found !== undefined) return found;
+			} catch {
+				// A store that throws answers the same as one that missed.
+			}
 		}
+		return undefined;
 	}
 
 	/**
-	 * The whole collection, with each chart's parents, modules and brief.
+	 * The collection as entries, for validating one chart against its siblings.
+	 * @param {string} specDir - the absolute `.spec` directory.
+	 * @returns {Map<string, object>} id → entry.
+	 */
+	function entriesOf(specDir) {
+		return readCollection(specDir).charts;
+	}
+
+	/**
+	 * The whole collection, with each chart's parents and module targets.
 	 * @param {object} session - the session.
 	 * @returns {object} the payload.
 	 */
 	function listPayload(session) {
 		const specDir = deps.specDirOf(session);
 		const { charts, problems } = readCollection(specDir);
-		const models = new Map([...charts].map(([id, chart]) => [id, chart.model]));
 		return {
 			ok: true,
 			specDir,
 			problems,
-			charts: [...charts.values()].map((chart) => ({
-				id: chart.model.id,
-				kind: chart.model.kind,
-				name: chart.model.name,
-				scope: chart.model.scope,
-				revision: chart.revision,
-				parents: parentsOf(models, chart.model.id),
-				modules: (chart.model.nodes ?? [])
+			charts: [...charts.values()].map((entry) => ({
+				id: entry.chart.id,
+				kind: kindOf(entry.chart.id),
+				name: entry.chart.name,
+				scope: entry.chart.scope,
+				revision: entry.revision,
+				parents: parentsOf(charts, entry.chart.id),
+				modules: (entry.graph.nodes ?? [])
 					.filter((node) => typeof node?.module === 'string' && node.module !== '')
 					.map((node) => node.module),
-				brief: readChartBrief(specDir, chart.model.id),
+				brief: entry.chart.brief,
 			})),
 		};
 	}
 
-	/**
-	 * The collection as models, for validating one chart against its siblings.
-	 * @param {string} specDir - the absolute `.spec` directory.
-	 * @returns {{ charts: Map<string, object>, models: Map<string, object> }} both views.
-	 */
-	function readBoth(specDir) {
-		const { charts } = readCollection(specDir);
-		return { charts, models: new Map([...charts].map(([id, chart]) => [id, chart.model])) };
-	}
-
 	const handler = async (req, res) => {
+		const url = new URL(req.url ?? '/', 'http://localhost');
+		const verb = url.pathname.slice(FLOWS_ROUTE.length).replace(/^\//, '');
+
+		if (verb === 'mermaid.js') {
+			// The drawing library is the same file for every reader and carries no
+			// project data, so it is served without the request fence and cached.
+			const path = mermaidAssetPath();
+			if (path === undefined) {
+				res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+				res.end('没有找到 mermaid。装一个，或用 DSH_SPEC_MERMAID 指定 mermaid.min.js 的路径。');
+				return;
+			}
+			// The same 3.4 MB for every page load: read it once per process and keep
+			// the header that says how long the browser may too.
+			mermaidCache ??= readFileSync(path);
+			const body = mermaidCache;
+			res.writeHead(200, {
+				'content-type': 'application/javascript; charset=utf-8',
+				'content-length': body.length,
+				'cache-control': 'public, max-age=86400',
+			});
+			res.end(body);
+			return;
+		}
+
 		if (!fence(req)) {
 			json(res, 403, { ok: false, code: 'forbidden', message: 'forbidden' });
 			return;
 		}
-		const url = new URL(req.url ?? '/', 'http://localhost');
-		const verb = url.pathname.slice(FLOWS_ROUTE.length).replace(/^\//, '');
+
 		try {
 			if (verb === 'list' && req.method === 'GET') {
 				const session = sessionOf(url);
@@ -176,52 +260,21 @@ export function registerFlowRoutes(ctx, deps) {
 					return;
 				}
 				const specDir = deps.specDirOf(session);
-				const { charts, models } = readBoth(specDir);
-				const read = charts.get(id);
-				if (read === undefined) {
+				const charts = entriesOf(specDir);
+				const entry = charts.get(id);
+				if (entry === undefined) {
 					json(res, 404, { ok: false, code: 'no-chart', message: `图集里没有「${id}」` });
 					return;
 				}
-				// The picture is always drawn from the current model, so an editor that
-				// has not saved yet still sees what its model would look like.
 				json(res, 200, {
 					ok: true,
-					chart: read.model,
-					revision: read.revision,
-					brief: readChartBrief(specDir, id),
-					svg: renderFlowSvg(drawableChart(read.model, models), `${read.model.name}：功能流程`, { interactive: true }),
+					chart: { id: entry.chart.id, name: entry.chart.name, scope: entry.chart.scope, brief: entry.chart.brief },
+					source: entry.chart.source,
+					// The view draws this string; module boxes already carry the name of
+					// the chart each one points at.
+					drawn: drawableChart(entry, charts),
+					revision: entry.revision,
 				});
-				return;
-			}
-
-			if (verb === 'preview' && req.method === 'POST') {
-				// A preview is drawn from the model the editor holds, which may be
-				// transiently invalid — a box added before its arrow, an edge added
-				// before its condition. It is not validated, and it is never written:
-				// the picture simply follows the editor, so dragging a box shows the
-				// result before anything is committed.
-				const payload = JSON.parse(await readBody(req));
-				const session = sessionOf(url);
-				if (session === undefined) {
-					json(res, 404, { ok: false, code: 'no-session', message: '找不到这个会话' });
-					return;
-				}
-				const specDir = deps.specDirOf(session);
-				const { models } = readBoth(specDir);
-				const candidate = payload?.chart;
-				if (candidate === null || typeof candidate !== 'object' || !Array.isArray(candidate.nodes)) {
-					json(res, 422, { ok: false, code: 'invalid', errors: ['chart 需要一个 nodes 数组'] });
-					return;
-				}
-				const id = typeof candidate.id === 'string' ? candidate.id.trim() : '';
-				const name = typeof candidate.name === 'string' && candidate.name.trim() !== '' ? candidate.name.trim() : '（未命名）';
-				models.set(id, { ...candidate, name });
-				try {
-					const svg = renderFlowSvg(drawableChart({ ...candidate, name }, models), `${name}：功能流程`, { interactive: true });
-					json(res, 200, { ok: true, svg });
-				} catch (error) {
-					json(res, 422, { ok: false, code: 'unrenderable', message: String(error?.message ?? error) });
-				}
 				return;
 			}
 
@@ -233,15 +286,15 @@ export function registerFlowRoutes(ctx, deps) {
 					return;
 				}
 				const specDir = deps.specDirOf(session);
-				const { charts, models } = readBoth(specDir);
+				const charts = entriesOf(specDir);
 				const candidate = payload?.chart;
 				const id = typeof candidate?.id === 'string' ? candidate.id.trim() : '';
-				const outcome = validateChart(candidate, { knownModules: new Set([...models.keys(), id]) });
+				const outcome = validateChart(candidate, { knownModules: new Set([...charts.keys(), id]) });
 				if (!outcome.ok) {
 					json(res, 422, { ok: false, code: 'invalid', errors: outcome.errors });
 					return;
 				}
-				const current = charts.get(outcome.model.id);
+				const current = charts.get(outcome.chart.id);
 				const expected = typeof payload?.revision === 'string' ? payload.revision : '';
 				if (current !== undefined && expected !== current.revision) {
 					json(res, 409, {
@@ -252,22 +305,18 @@ export function registerFlowRoutes(ctx, deps) {
 					});
 					return;
 				}
-				models.set(outcome.model.id, outcome.model);
-				const collection = validateCollection(models);
+				charts.set(outcome.chart.id, { chart: outcome.chart, graph: outcome.graph, revision: '' });
+				const collection = validateCollection(charts);
 				if (collection.errors.length > 0) {
 					json(res, 422, { ok: false, code: 'invalid', errors: collection.errors });
 					return;
 				}
-				ensureFlowsDir(specDir);
-				writeChartModel(specDir, outcome.model);
-				const brief = typeof payload?.brief === 'string' ? payload.brief : undefined;
-				if (brief !== undefined) writeChartBrief(specDir, outcome.model.id, brief);
-				const picture = await deps.redraw(specDir, models, outcome.model.id);
+				const written = writeChart(specDir, outcome.chart);
 				json(res, 200, {
 					ok: true,
-					id: outcome.model.id,
-					revision: revisionOf(outcome.model),
-					picture: picture.path,
+					id: outcome.chart.id,
+					revision: written.revision,
+					path: written.path,
 					warnings: collection.warnings,
 				});
 				return;
@@ -281,39 +330,32 @@ export function registerFlowRoutes(ctx, deps) {
 					return;
 				}
 				const specDir = deps.specDirOf(session);
-				const { models } = readBoth(specDir);
+				const charts = entriesOf(specDir);
 				const id = typeof payload?.id === 'string' ? payload.id.trim() : '';
-				const model = {
-					id,
-					kind: payload?.kind === 'overview' ? 'overview' : 'module',
-					name: typeof payload?.name === 'string' ? payload.name.trim() : '',
-					scope: typeof payload?.scope === 'string' ? payload.scope.trim() : '',
-					// A new chart starts as two steps with one arrow: an empty graph would
-					// fail the two-node rule and read as a broken chart rather than a blank
-					// one the author is about to fill in.
-					nodes: SEED_NODES.map((node) => ({ ...node })),
-					edges: SEED_EDGES.map((edge) => ({ ...edge })),
-				};
-				if (models.has(id)) {
+				if (charts.has(id)) {
 					json(res, 409, { ok: false, code: 'exists', message: `图集里已经有「${id}」` });
 					return;
 				}
-				const known = new Set([...models.keys(), id]);
-				const outcome = validateChart(model, { knownModules: known });
+				const chart = {
+					id,
+					name: typeof payload?.name === 'string' ? payload.name.trim() : '',
+					scope: typeof payload?.scope === 'string' ? payload.scope.trim() : '',
+					source: SEED_SOURCE,
+					brief: '',
+				};
+				const outcome = validateChart(chart, { knownModules: new Set([...charts.keys(), id]) });
 				if (!outcome.ok) {
 					json(res, 422, { ok: false, code: 'invalid', errors: outcome.errors });
 					return;
 				}
-				models.set(outcome.model.id, outcome.model);
-				const collection = validateCollection(models);
+				charts.set(outcome.chart.id, { chart: outcome.chart, graph: outcome.graph, revision: '' });
+				const collection = validateCollection(charts);
 				if (collection.errors.length > 0) {
 					json(res, 422, { ok: false, code: 'invalid', errors: collection.errors });
 					return;
 				}
-				ensureFlowsDir(specDir);
-				writeChartModel(specDir, outcome.model);
-				await deps.redraw(specDir, models, outcome.model.id);
-				json(res, 200, { ok: true, id: outcome.model.id, revision: revisionOf(outcome.model) });
+				const written = writeChart(specDir, outcome.chart);
+				json(res, 200, { ok: true, id: outcome.chart.id, revision: written.revision });
 				return;
 			}
 
@@ -325,15 +367,15 @@ export function registerFlowRoutes(ctx, deps) {
 					return;
 				}
 				const specDir = deps.specDirOf(session);
-				const { models } = readBoth(specDir);
+				const charts = entriesOf(specDir);
 				const id = typeof payload?.id === 'string' ? payload.id.trim() : '';
-				if (!models.has(id)) {
+				if (!charts.has(id)) {
 					json(res, 404, { ok: false, code: 'no-chart', message: `图集里没有「${id}」` });
 					return;
 				}
 				// Deleting a chart is a collection-level change: the parents that point
-				// at it and the single-overview rule both have to survive it.
-				const collection = validateCollection(models, { removed: [id] });
+				// at it and the overview rule both have to survive it.
+				const collection = validateCollection(charts, { removed: [id] });
 				if (collection.errors.length > 0) {
 					json(res, 422, { ok: false, code: 'invalid', errors: collection.errors });
 					return;

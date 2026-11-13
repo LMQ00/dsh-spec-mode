@@ -1,6 +1,6 @@
 {
   "name": "dsh-spec-mode",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "type": "module",
   "scripts": {
     "test": "node selftest.mjs && node landing-test.mjs",
@@ -32,11 +32,10 @@
     "advisories.js",
     "prompt.js",
     "brief.js",
-    "flow.js",
-    "flow-svg.js",
     "flows.js",
     "flows-api.js",
-    "rasterize.js",
+    "chart-md.js",
+    "mermaid-graph.js",
     "client.js",
     "cordis.patch.yml",
     "selftest.mjs",
@@ -46,9 +45,7 @@
     "docs",
     "LICENSE",
     "icon.svg",
-    ".spec/flows/*.json",
-    ".spec/flows/*.png",
-    ".spec/flows/*.brief.md",
+    ".spec/flows/*.md",
     "locale/*.json"
   ],
   "dsh": {

@@ -9,7 +9,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -78,6 +78,9 @@ function makeContext(projectDir, { answers = [], webServer = false } = {}) {
 			};
 		},
 		get: (name) => {
+			// The chart routes resolve the session a request names, then read that
+			// session's working directory; the fake keeps the same two facts.
+			if (name === 'sessions') return new Map([[`session-fake`, session(projectDir)]]);
 			if (name === 'userQuestions') {
 				return {
 					ask: async (request) => {
@@ -108,18 +111,19 @@ const goodArgs = (title) => ({
 	charts: [
 		{
 			id: 'overview',
-			kind: 'overview',
-			name: `记 <${title}> 的需求`,
+			name: `记 ${title} 的需求`,
 			scope: '从用户点导出到最后拿到 CSV',
-			nodes: [
-				{ id: 'N1', label: '用户点击导出按钮' },
-				{ id: 'N2', label: '页面按当前筛选读取账单' },
-				{ id: 'N3', label: '浏览器开始下载 CSV 文件' },
-			],
-			edges: [{ from: 'N1', to: 'N2' }, { from: 'N2', to: 'N3' }],
-			brief: '# 记导出的需求\n\n## 目标\n用户在列表页能导出当前筛选结果为 CSV。\n\n'
-				+ '## 要做什么\n- 列表页右上角有「导出」按钮。\n- 导出范围是当前筛选结果。\n\n'
-				+ '## 验收\n- 1000 条导出后文件 1001 行（含表头）。\n\n## 约束\n- 只做 CSV。\n',
+			source: [
+				'flowchart LR',
+				'  n1["用户点击导出按钮"]',
+				'  n2["页面按当前筛选读取账单"]',
+				'  n3["浏览器开始下载 CSV 文件"]',
+				'  n1 --> n2',
+				'  n2 --> n3',
+			].join('\n'),
+			brief: '### 目标\n用户在列表页能导出当前筛选结果为 CSV。\n\n'
+				+ '### 要做什么\n- 列表页右上角有「导出」按钮。\n- 导出范围是当前筛选结果。\n\n'
+				+ '### 验收\n- 1000 条导出后文件 1001 行（含表头）。\n\n### 约束\n- 只做 CSV。\n',
 		},
 	],
 });
@@ -174,7 +178,7 @@ check('the prompt section is empty while the mode is off and non-empty while it 
 	const text = section.text({ agent });
 	assert.ok(text.includes('## Spec mode'));
 	assert.ok(text.includes('.spec/draft.md'));
-	assert.ok(text.includes('brief'));
+	assert.ok(text.includes('## 简报'));
 	assert.ok(text.includes('flow'));
 	assert.equal(section.text({}), '');
 });
@@ -195,7 +199,7 @@ check('a rejection keeps the mode and writes nothing', async () => {
 		threw = error;
 	}
 	assert.ok(threw !== undefined, '驳回必须抛错');
-	assert.ok(threw.message.includes('保持开启'));
+	assert.ok(threw.message.includes('保持开启'), threw.message);
 	assert.equal(existsSync(join(dir, '.spec', 'flows')), false, '驳回时连目录都不该建');
 });
 
@@ -207,7 +211,7 @@ check('a validation failure throws before the review box opens', async () => {
 	const tool = ctx._registered.tools[0].definition;
 	const agent = { session: session(dir) };
 	const broken = goodArgs('invalid');
-	broken.charts[0].brief = '# 记导出的需求\n\n## 目标\n能够导出。\n\n## 要做什么\n- 先做导出，因为用户要求。\n\n## 验收\n- 能下载。\n';
+	broken.charts[0].brief = '### 目标\n能够导出。\n\n### 要做什么\n- 先做导出，因为用户要求。\n\n### 验收\n- 能下载。\n';
 	let threw;
 	try {
 		await tool.execute(broken, { agent, signal: undefined });
@@ -220,7 +224,7 @@ check('a validation failure throws before the review box opens', async () => {
 	assert.equal(ctx._asked.length, 0, '校验不过时不得弹框');
 });
 
-check('an approval writes the brief and a chart image, deletes the draft', async () => {
+check('an approval writes one markdown file per chart and deletes the draft', async () => {
 	const dir = join(sandbox, 'approve');
 	mkdirSync(join(dir, '.git'), { recursive: true });
 	mkdirSync(join(dir, '.spec'), { recursive: true });
@@ -235,33 +239,23 @@ check('an approval writes the brief and a chart image, deletes the draft', async
 	assert.equal(value.charts.length, 1);
 	const landed = value.charts[0];
 	assert.equal(landed.id, 'overview');
-	assert.equal(landed.model, join(dir, '.spec', 'flows', 'overview.json'));
+	assert.equal(landed.path, join(dir, '.spec', 'flows', 'overview.md'));
+	assert.equal(landed.brief, '已写');
 
-	const model = readFileSync(landed.model, 'utf8');
-	assert.ok(model.includes('"kind": "overview"'));
-
-	const brief = readFileSync(join(dir, '.spec', 'flows', 'overview.brief.md'), 'utf8');
-	assert.ok(brief.startsWith('# 记导出的需求\n'));
-	assert.ok(brief.includes('## 目标'));
-	assert.ok(brief.includes('## 要做什么'));
-	assert.ok(brief.includes('## 验收'));
-	assert.ok(brief.includes('## 约束'));
-
-	// The chart is a picture: PNG bytes, or SVG source when no renderer exists.
-	const picturePath = join(dir, '.spec', 'flows', existsSync(join(dir, '.spec', 'flows', 'overview.png')) ? 'overview.png' : 'overview.svg');
-	const chart = readFileSync(picturePath);
-	if (picturePath.endsWith('.png')) {
-		assert.equal(chart.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', 'PNG 头');
-		assert.ok(chart.length > 1000, `图片太小：${chart.length}`);
-	} else {
-		const svg = chart.toString('utf8');
-		assert.ok(svg.startsWith('<svg'));
-		assert.ok(svg.includes('用户点击导出按钮'));
-	}
+	// One file carries the title, the scope, the diagram and the brief.
+	const file = readFileSync(landed.path, 'utf8');
+	assert.ok(file.startsWith('# 记 approve 的需求\n'), file.slice(0, 40));
+	assert.ok(file.includes('从用户点导出到最后拿到 CSV'));
+	assert.ok(file.includes('```mermaid\nflowchart LR\n'));
+	assert.ok(file.includes('n1["用户点击导出按钮"]'));
+	assert.ok(file.includes('## 简报'));
+	for (const section of ['### 目标', '### 要做什么', '### 验收', '### 约束']) assert.ok(file.includes(section), section);
+	// Nothing else was written beside it: a chart is one document.
+	assert.deepEqual(readdirSync(join(dir, '.spec', 'flows')), ['overview.md']);
 
 	assert.equal(existsSync(join(dir, '.spec', 'draft.md')), false, '草稿必须被删掉');
 	assert.equal(ctx._asked.length, 1, '批准前弹过一次框');
-	assert.ok(ctx._asked[0].questions[0].detail.includes('记 <approve> 的需求'));
+	assert.ok(ctx._asked[0].questions[0].detail.includes('记 approve 的需求'));
 	assert.ok(ctx._asked[0].questions[0].detail.includes('用户点击导出按钮'), '确认框要列出图上那些框');
 });
 
@@ -273,7 +267,7 @@ check('a missing draft is not a landing failure', async () => {
 	const tool = ctx._registered.tools[0].definition;
 	const value = await tool.execute(goodArgs('nodraft'), { agent: { session: session(dir) }, signal: undefined });
 	assert.equal(value.exited, true);
-	assert.ok(existsSync(value.charts[0].model));
+		assert.ok(existsSync(value.charts[0].path), value.charts[0].path);
 });
 
 check('calling the tool outside the mode throws', async () => {
@@ -352,7 +346,7 @@ check('only AGENTS.md earns a write-time advisory now', async () => {
 	const badBrief = '# t\n\n## 目标\ngoal\n\n## 要做什么\n- a\n\n## 验收\n';
 
 	ctx._state = { active: true, running: null, exitCall: null };
-	for (const target of ['.spec/brief.md', '.spec/flows/overview.brief.md', '.spec/draft.md']) {
+	for (const target of ['.spec/brief.md', '.spec/flows/overview.md', '.spec/draft.md']) {
 		const decision = await listener(
 			{ name: 'write', arguments: { file_path: join(dir, target), content: badBrief }, agent },
 			{ isError: false },
@@ -384,6 +378,126 @@ check('the AGENTS.md line budget reports outside the mode too', async () => {
 	);
 	assert.equal(decision.additionalContexts.length, 1);
 	assert.ok(decision.additionalContexts[0].content[0].text.includes('200 行'));
+});
+
+/* ---- the collection over HTTP ---- */
+
+/**
+ * One request the route handler can consume.
+ * @param {string} method - the HTTP method.
+ * @param {string} url - the path and query.
+ * @param {unknown} [body] - the JSON body, when there is one.
+ * @returns {object} the fake request.
+ */
+function fakeRequest(method, url, body) {
+	const text = body === undefined ? '' : JSON.stringify(body);
+	return {
+		method,
+		url,
+		async *[Symbol.asyncIterator]() {
+			if (text !== '') yield Buffer.from(text, 'utf8');
+		},
+	};
+}
+
+/**
+ * A response that records what the handler wrote.
+ * @returns {object} the fake response, with `_status`, `_headers` and `_body` filled in.
+ */
+function fakeResponse() {
+	return {
+		_status: 0,
+		_headers: undefined,
+		_body: '',
+		writeHead(status, headers) {
+			this._status = status;
+			this._headers = headers;
+		},
+		end(body) {
+			this._body = typeof body === 'string' ? body : String(body ?? '');
+		},
+	};
+}
+
+/** The parsed body of a fake response. */
+const payloadOf = (res) => JSON.parse(res._body);
+
+check('the collection routes list, read, save, create and delete', async () => {
+	const dir = join(sandbox, 'routes');
+	mkdirSync(join(dir, '.git'), { recursive: true });
+	const ctx = makeContext(dir, { webServer: true });
+	ctx._state = { active: false, running: null, exitCall: null };
+	const handler = ctx._registered.webServer.routes[0].handler;
+
+	const list = fakeResponse();
+	await handler(fakeRequest('GET', '/spec/flows/list?session=session-fake'), list);
+	assert.equal(list._status, 200);
+	assert.deepEqual(payloadOf(list).charts, []);
+
+	const created = fakeResponse();
+	await handler(fakeRequest('POST', '/spec/flows/create?session=session-fake', { id: 'overview', name: '总览', scope: '从甲到乙' }), created);
+	assert.equal(created._status, 200, created._body);
+	assert.ok(existsSync(join(dir, '.spec', 'flows', 'overview.md')));
+
+	const again = fakeResponse();
+	await handler(fakeRequest('POST', '/spec/flows/create?session=session-fake', { id: 'overview', name: '总览', scope: '从甲到乙' }), again);
+	assert.equal(again._status, 409);
+
+	const read = fakeResponse();
+	await handler(fakeRequest('GET', '/spec/flows/chart?session=session-fake&id=overview'), read);
+	assert.equal(read._status, 200, read._body);
+	const one = payloadOf(read);
+	assert.equal(one.chart.name, '总览');
+	assert.ok(one.source.startsWith('flowchart LR'), one.source);
+	assert.equal(one.drawn, one.source, '没有模块框时画出来的就是原文');
+	assert.equal(one.revision, payloadOf(created).revision);
+
+	// A save that quotes the revision it read goes through; the same save twice
+	// does not, because the first one replaced the file it was checked against.
+	const stale = { chart: { id: 'overview', name: '总览', scope: '从甲到乙', source: 'flowchart LR\n  a["甲"]\n  b["乙"]\n  a --> b\n', brief: '' } };
+	const saved = fakeResponse();
+	await handler(fakeRequest('POST', '/spec/flows/save?session=session-fake', { ...stale, revision: one.revision }), saved);
+	assert.equal(saved._status, 200, saved._body);
+	assert.ok(readFileSync(join(dir, '.spec', 'flows', 'overview.md'), 'utf8').includes('a["甲"]'));
+
+	const conflict = fakeResponse();
+	await handler(fakeRequest('POST', '/spec/flows/save?session=session-fake', { ...stale, revision: one.revision }), conflict);
+	assert.equal(conflict._status, 409);
+	assert.equal(payloadOf(conflict).revision, payloadOf(saved).revision);
+
+	// A chart the checks refuse never reaches the disk.
+	const bad = fakeResponse();
+	await handler(fakeRequest('POST', '/spec/flows/save?session=session-fake', {
+		chart: { id: 'overview', name: '总览', scope: '从甲到乙', source: 'flowchart LR\n  a["甲"]\n', brief: '' },
+		revision: payloadOf(saved).revision,
+	}), bad);
+	assert.equal(bad._status, 422);
+	assert.ok(payloadOf(bad).errors.length > 0);
+
+	const removed = fakeResponse();
+	await handler(fakeRequest('POST', '/spec/flows/delete?session=session-fake', { id: 'overview' }), removed);
+	assert.equal(removed._status, 422, '总览删不掉');
+
+	const unknown = fakeResponse();
+	await handler(fakeRequest('GET', '/spec/flows/nope?session=session-fake'), unknown);
+	assert.equal(unknown._status, 404);
+});
+
+check('the drawing library is served as a script', async () => {
+	const dir = join(sandbox, 'mermaid');
+	mkdirSync(join(dir, '.git'), { recursive: true });
+	const ctx = makeContext(dir, { webServer: true });
+	const handler = ctx._registered.webServer.routes[0].handler;
+	const res = fakeResponse();
+	await handler(fakeRequest('GET', '/spec/flows/mermaid.js'), res);
+	if (res._status === 404) {
+		// A machine without mermaid installed says so instead of serving nothing.
+		assert.ok(res._body.includes('DSH_SPEC_MERMAID'), res._body);
+		return;
+	}
+	assert.equal(res._status, 200);
+	assert.equal(res._headers['content-type'], 'application/javascript; charset=utf-8');
+	assert.ok(res._body.length > 1000000);
 });
 
 console.log(`\n${passed} checks passed`);

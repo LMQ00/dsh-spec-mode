@@ -1,30 +1,29 @@
 /**
- * The chart collection: every chart in `.spec/flows/`, the references between
+ * The chart collection: every file in `.spec/flows/`, the references between
  * them, and the checks that only make sense once more than one chart exists.
  *
- * A single chart file is a plain JSON object; the collection is what turns one
- * fixed file name into a named set. The distinction is the whole point: a
- * project keeps one overview of what the product does and one chart per module,
- * and the reader can tell which is which without opening a conversation log.
+ * One chart is one markdown file — its title, its scope, its mermaid block and
+ * its brief — so a chart is a document rather than a name to look up. The
+ * collection is what turns a folder of documents into a set: a project keeps one
+ * overview of what the product does and one document per module, and the reader
+ * can tell which is which without opening a conversation log.
  *
- * Three file names share one stem, so a chart is a unit rather than a name to
- * look up: `<id>.json` is the model (the truth), `<id>.png` is the picture drawn
- * from it (a cache, rewritten whenever the model changes), and `<id>.brief.md` is
- * the requirements that chart exists for.
+ * The overview is the chart filed as `overview`. That is the one id the
+ * collection reserves, and it is what makes 「exactly one overview」 a fact about
+ * the folder instead of a field every writer has to remember to copy.
  *
  * @module dsh-spec-mode/flows
  */
 
-import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { validateFlow } from './flow.js';
+import { CHART_EXT, canonicalMarkdown, chartPath, graphOf, parseChartMarkdown, revisionOf } from './chart-md.js';
+import { drawMermaidNamed } from './mermaid-graph.js';
 
-/** The directory name, under `.spec`, that holds the collection. */
-export const FLOWS_DIR = 'flows';
+export { CHART_EXT, FLOWS_DIR, chartPath } from './chart-md.js';
 
-/** The one kind that is the whole product; every other chart is a module. */
+/** The id the overview is filed under. */
 export const OVERVIEW = 'overview';
 
 /** The other kind: a chart some parent chart points at. */
@@ -46,75 +45,13 @@ const SCOPE_MAX_CHARS = 160;
  */
 const VAGUE_SCOPE_RE = /(本次|相关|等等|之类|若干|一些)/;
 
-/** Longest a single `ports` entry may run. */
-const PORT_MAX_CHARS = 60;
-
 /**
- * Canonical JSON: keys in a fixed order, no trailing whitespace. The revision is
- * a hash of this text, so two writers that produce the same model agree on the
- * revision regardless of how they serialized it.
- * @param {object} model - one chart's model.
- * @returns {string} the canonical text.
- */
-export function canonicalModel(model) {
-	const ordered = {
-		id: model.id,
-		kind: model.kind,
-		name: model.name,
-		scope: model.scope,
-		nodes: model.nodes,
-		edges: model.edges,
-	};
-	return `${JSON.stringify(ordered, null, '\t')}\n`;
-}
-
-/**
- * The revision of one model: a hash of its canonical text.
- * @param {object} model - one chart's model.
- * @returns {string} the revision.
- */
-export function revisionOf(model) {
-	return createHash('sha256').update(canonicalModel(model), 'utf8').digest('hex').slice(0, 16);
-}
-
-/**
- * Absolute path of one chart's model file.
- * @param {string} specDir - the absolute `.spec` directory.
+ * The kind of chart an id names.
  * @param {string} id - the chart id.
- * @returns {string} the path.
+ * @returns {string} `overview` or `module`.
  */
-export function chartModelPath(specDir, id) {
-	return join(specDir, FLOWS_DIR, `${id}.json`);
-}
-
-/**
- * Absolute path of one chart's picture.
- * @param {string} specDir - the absolute `.spec` directory.
- * @param {string} id - the chart id.
- * @returns {string} the path.
- */
-export function chartImagePath(specDir, id) {
-	return join(specDir, FLOWS_DIR, `${id}.png`);
-}
-
-/**
- * Absolute path of one chart's vector fallback.
- * @param {string} specDir - the absolute `.spec` directory.
- * @param {string} id - the chart id.
- * @returns {string} the path.
- */
-export function chartVectorPath(specDir, id) {
-	return join(specDir, FLOWS_DIR, `${id}.svg`);
-}
-
-/**
- * Absolute path of one chart's brief.
- * @param {string} specDir - the absolute `.spec` directory.
- * @param {string} id - the chart id.
- * @returns {string} the path.
- */
-export function chartBriefPath(specDir, id) {
-	return join(specDir, FLOWS_DIR, `${id}.brief.md`);
+export function kindOf(id) {
+	return id === OVERVIEW ? OVERVIEW : MODULE;
 }
 
 /**
@@ -123,7 +60,7 @@ export function chartBriefPath(specDir, id) {
  * @returns {string} the path.
  */
 export function flowsDirPath(specDir) {
-	return join(specDir, FLOWS_DIR);
+	return join(specDir, 'flows');
 }
 
 /**
@@ -146,8 +83,8 @@ export function ensureFlowsDir(specDir) {
 export function listChartIds(specDir) {
 	try {
 		return readdirSync(flowsDirPath(specDir))
-			.filter((entry) => entry.endsWith('.json'))
-			.map((entry) => entry.slice(0, -'.json'.length))
+			.filter((entry) => entry.endsWith(CHART_EXT))
+			.map((entry) => entry.slice(0, -CHART_EXT.length))
 			.sort();
 	} catch {
 		return [];
@@ -155,27 +92,24 @@ export function listChartIds(specDir) {
 }
 
 /**
- * Read one chart's model, or `undefined` when the file is missing.
+ * Read one chart, or `undefined` when the file is missing.
  * @param {string} specDir - the absolute `.spec` directory.
  * @param {string} id - the chart id.
- * @returns {{ model: object, revision: string } | { broken: string } | undefined} the chart.
+ * @returns {{ chart: object, graph: object, revision: string } | { broken: string } | undefined} the chart.
  */
 export function readChart(specDir, id) {
-	const path = chartModelPath(specDir, id);
+	const path = chartPath(specDir, id);
 	let text;
 	try {
 		text = readFileSync(path, 'utf8');
 	} catch {
 		return undefined;
 	}
-	let model;
-	try {
-		model = JSON.parse(text);
-	} catch (error) {
-		return { broken: `${id}.json 不是合法的 JSON：${error?.message ?? error}` };
-	}
-	if (model === null || typeof model !== 'object') return { broken: `${id}.json 的顶层必须是对象` };
-	return { model, revision: revisionOf(model) };
+	const parsed = parseChartMarkdown(id, text);
+	if (parsed.broken !== undefined) return { broken: parsed.broken };
+	const graph = graphOf(parsed.chart);
+	if (!graph.ok) return { broken: `${id}${CHART_EXT} 画不出来：${graph.errors.join('；')}` };
+	return { chart: parsed.chart, graph: graph.graph, revision: revisionOf(text) };
 }
 
 /**
@@ -200,14 +134,15 @@ export function readCollection(specDir) {
 }
 
 /**
- * Read one chart's brief, or `''` when the file is missing.
+ * Read one chart's brief, or `''` when the file or the section is missing.
  * @param {string} specDir - the absolute `.spec` directory.
  * @param {string} id - the chart id.
  * @returns {string} the brief text.
  */
 export function readChartBrief(specDir, id) {
 	try {
-		return readFileSync(chartBriefPath(specDir, id), 'utf8');
+		const parsed = parseChartMarkdown(id, readFileSync(chartPath(specDir, id), 'utf8'));
+		return parsed.chart?.brief ?? '';
 	} catch {
 		return '';
 	}
@@ -215,16 +150,15 @@ export function readChartBrief(specDir, id) {
 
 /**
  * The charts that point at one chart.
- * @param {Map<string, object>} charts - id → model, for every chart.
+ * @param {Map<string, object>} charts - id → entry, for every chart.
  * @param {string} id - the chart being looked up.
  * @returns {string[]} the parent ids.
  */
 export function parentsOf(charts, id) {
 	const parents = [];
-	for (const [otherId, model] of charts) {
+	for (const [otherId, entry] of charts) {
 		if (otherId === id) continue;
-		const found = (model.nodes ?? []).some((node) => node?.module === id);
-		if (found) parents.push(otherId);
+		if ((entry.graph?.nodes ?? []).some((node) => node?.module === id)) parents.push(otherId);
 	}
 	return parents;
 }
@@ -232,7 +166,7 @@ export function parentsOf(charts, id) {
 /**
  * The reference graph of the whole collection: which chart points at which, and
  * whether that graph can be laid out at all.
- * @param {Map<string, object>} charts - id → model.
+ * @param {Map<string, object>} charts - id → entry.
  * @returns {{ parents: Map<string, string[]>, children: Map<string, string[]>, cycles: string[][] }} the graph.
  */
 export function referenceGraph(charts) {
@@ -242,8 +176,8 @@ export function referenceGraph(charts) {
 		parents.set(id, []);
 		children.set(id, []);
 	}
-	for (const [id, model] of charts) {
-		for (const node of model.nodes ?? []) {
+	for (const [id, entry] of charts) {
+		for (const node of entry.graph?.nodes ?? []) {
 			const target = node?.module;
 			if (typeof target !== 'string' || target === '') continue;
 			if (!charts.has(target)) continue;
@@ -274,28 +208,27 @@ export function referenceGraph(charts) {
 }
 
 /**
- * Validate one chart model on its own: the fields the collection owns, then the
- * graph rules `validateFlow` already applies.
+ * Validate one chart on its own: the fields the file owns, then the graph rules
+ * `mermaid-graph.js` applies.
  * @param {unknown} input - the submitted chart.
- * @param {{ knownModules?: Set<string> }} [options] - resolvable module ids.
- * @returns {{ ok: true, model: object } | { ok: false, errors: string[] }} the outcome.
+ * @param {{ knownModules?: Set<string> }} [options] - resolvable chart ids.
+ * @returns {{ ok: true, chart: object, graph: object } | { ok: false, errors: string[] }} the outcome.
  */
 export function validateChart(input, options = {}) {
 	if (input === null || typeof input !== 'object' || Array.isArray(input)) {
-		return { ok: false, errors: ['chart: 必须是一个对象 { id, kind, name, scope, nodes, edges }'] };
+		return { ok: false, errors: ['chart: 必须是一个对象 { id, name, scope, source, brief }'] };
 	}
 	const errors = [];
 	const id = typeof input.id === 'string' ? input.id.trim() : '';
 	if (!ID_RE.test(id)) {
 		errors.push(`chart.id: 需匹配 [a-z][a-z0-9-]{0,23}，收到「${id}」——它是文件名，只用小写字母、数字与短横`);
 	}
-	const kind = input.kind;
-	if (kind !== OVERVIEW && kind !== MODULE) {
-		errors.push(`chart.kind: 只能是 "${OVERVIEW}" 或 "${MODULE}"，收到「${String(kind)}」`);
-	}
 	const name = typeof input.name === 'string' ? input.name.trim() : '';
-	if (name === '') errors.push('chart.name: 不能为空——它画在框上，是读者看到的那个名字');
+	if (name === '') errors.push('chart.name: 不能为空——它就是文件第一行，也是模块框上显示的字');
 	else if (name.length > NAME_MAX_CHARS) errors.push(`chart.name: 超过 ${NAME_MAX_CHARS} 字符`);
+	// The name is copied into every parent's mermaid when that parent is drawn, so
+	// it has to survive being put inside a quoted label.
+	else if (name.includes('"') || name.includes('<')) errors.push('chart.name: 含双引号或 <；它要出现在引用它的模块框里，换成「」');
 	const scope = typeof input.scope === 'string' ? input.scope.trim() : '';
 	if (scope === '') errors.push('chart.scope: 不能为空——它说明这张图从哪到哪，是这份图集存在的理由');
 	else if (scope.length > SCOPE_MAX_CHARS) errors.push(`chart.scope: 超过 ${SCOPE_MAX_CHARS} 字符，说清楚从哪到哪就够`);
@@ -307,81 +240,72 @@ export function validateChart(input, options = {}) {
 	}
 	if (errors.length > 0) return { ok: false, errors };
 
-	const outcome = validateFlow({ nodes: input.nodes, edges: input.edges }, {
-		knownModules: options.knownModules,
-	});
-	if (!outcome.ok) return outcome;
+	const source = typeof input.source === 'string' ? input.source : '';
+	const drawn = graphOf({ source }, options);
+	if (!drawn.ok) return { ok: false, errors: drawn.errors };
 	return {
 		ok: true,
-		model: { id, kind, name, scope, nodes: outcome.flow.nodes, edges: outcome.flow.edges },
+		chart: { id, name, scope, source: source.endsWith('\n') ? source : `${source}\n`, brief: typeof input.brief === 'string' ? input.brief.trim() : '' },
+		graph: drawn.graph,
 	};
 }
 
 /**
  * The checks that need the whole collection in hand.
  *
- * Everything here is either a contradiction (two overviews, a dangling
- * reference, a cycle) or a warning (an orphan, a row of too many modules). The
- * split matters: a warning must never stop a landing, or the author would attach
- * a fake edge just to pass.
+ * Everything here is either a contradiction (no overview, a dangling reference,
+ * a cycle) or a warning (an orphan, a row of too many modules). The split
+ * matters: a warning must never stop a landing, or the author would attach a fake
+ * edge just to pass.
  *
- * @param {Map<string, object>} models - id → model, after per-chart validation.
+ * @param {Map<string, object>} charts - id → entry, after per-chart validation.
  * @param {{ removed?: string[] }} [options] - charts this landing deletes.
  * @returns {{ errors: string[], warnings: string[] }} the outcome.
  */
-export function validateCollection(models, options = {}) {
+export function validateCollection(charts, options = {}) {
 	const errors = [];
 	const warnings = [];
 	const removed = new Set(options.removed ?? []);
 
-	const overviews = [...models.entries()].filter(([, model]) => model.kind === OVERVIEW).map(([id]) => id);
-	if (overviews.length === 0) errors.push(`图集里没有总览：恰好要有一张 kind 为 "${OVERVIEW}" 的图，它才是产品全貌`);
-	if (overviews.length > 1) errors.push(`图集里有 ${overviews.length} 张总览（${overviews.join('、')}）：只能有一张`);
+	if (!charts.has(OVERVIEW) && !removed.has(OVERVIEW)) {
+		errors.push(`图集里没有总览：恰好要有一个 id 为 "${OVERVIEW}" 的图，它才是产品全貌`);
+	}
 
 	// A deleted chart must be unreferenced before it goes, or the parent keeps an
 	// arrow into nothing and the reader sees a box that cannot be opened.
 	for (const id of removed) {
-		const parents = parentsOf(models, id);
+		const parents = parentsOf(charts, id);
 		if (parents.length > 0) {
-			errors.push(`删除 ${id} 被拒绝：${parents.join('、')} 还在引用它。先改掉那些图里的模块节点，再删`);
+			errors.push(`删除 ${id} 被拒绝：${parents.join('、')} 还在引用它。先改掉那些图里的模块框，再删`);
 		}
-		if (models.get(id)?.kind === OVERVIEW) {
-			errors.push(`删除 ${id} 被拒绝：它是总览，图集里必须留一张`);
-		}
+		if (id === OVERVIEW) errors.push(`删除 ${id} 被拒绝：它是总览，图集里必须留一张`);
 	}
 
-	for (const [id, model] of models) {
+	for (const [id, entry] of charts) {
 		if (removed.has(id)) continue;
-		for (const node of model.nodes ?? []) {
+		for (const node of entry.graph?.nodes ?? []) {
 			const target = node?.module;
 			if (typeof target !== 'string' || target === '') continue;
-			if (!models.has(target)) {
-				errors.push(`${id}: 节点 ${node.id} 指向的图「${target}」不在图集里`);
-			}
+			if (!charts.has(target)) errors.push(`${id}: 模块框 ${node.id} 指向的图「${target}」不在图集里`);
 		}
 	}
 
-	const live = new Map([...models].filter(([id]) => !removed.has(id)));
+	const live = new Map([...charts].filter(([id]) => !removed.has(id)));
 	const graph = referenceGraph(live);
 	for (const cycle of graph.cycles) {
 		errors.push(`图之间的引用成环：${cycle.join(' → ')}。模块图不能再指回引用它的那张图`);
 	}
 
-	for (const [id, model] of live) {
-		if (model.kind === OVERVIEW) continue;
+	for (const [id, entry] of live) {
+		if (kindOf(id) === OVERVIEW) continue;
 		const parents = (graph.parents.get(id) ?? []).filter((parent) => !removed.has(parent));
-		if (parents.length === 0) {
-			warnings.push(`${id} 没有被任何图引用，看图的人找不到它：要么把它接进总览，要么删掉`);
-		}
+		if (parents.length === 0) warnings.push(`${id} 没有被任何图引用，看图的人找不到它：要么把它接进总览，要么删掉`);
 	}
 
-	for (const [id, model] of live) {
-		const modules = (model.nodes ?? []).filter((node) => typeof node?.module === 'string' && node.module !== '');
+	for (const [id, entry] of live) {
+		const modules = (entry.graph?.nodes ?? []).filter((node) => typeof node?.module === 'string' && node.module !== '');
 		if (modules.length > TOP_MODULE_WARN) {
-			warnings.push(
-				`${id} 有 ${modules.length} 个模块框，一行排下来字会缩到看不清：`
-				+ '把其中几个先收进一张子图，总览只留顶层',
-			);
+			warnings.push(`${id} 有 ${modules.length} 个模块框，一行排下来字会缩到看不清：把其中几个先收进一张子图，总览只留顶层`);
 		}
 	}
 
@@ -389,106 +313,45 @@ export function validateCollection(models, options = {}) {
 }
 
 /**
- * Fill in the words a chart draws but does not store: every module node's box
- * takes the name of the chart it points at.
- *
- * The name lives in exactly one place — the target chart — and is copied here at
- * draw time. Storing it in the parent instead would mean renaming a chart leaves
- * a stale box in every parent that uses it, and nothing would report it.
- *
- * @param {object} model - one validated chart.
- * @param {Map<string, object>} models - every chart, by id.
- * @returns {{ nodes: object[], edges: object[] }} the chart as the renderer takes it.
+ * The source the view draws: every module box takes the name of the chart it
+ * points at, so renaming a chart renames every place it appears.
+ * @param {object} entry - one chart's entry.
+ * @param {Map<string, object>} charts - every chart, by id.
+ * @returns {string} the mermaid source.
  */
-export function drawableChart(model, models) {
-	const nodes = (model.nodes ?? []).map((node) => {
-		if (typeof node.module !== 'string' || node.module === '') return node;
-		const target = models.get(node.module);
-		return {
-			id: node.id,
-			label: target?.name ?? `${node.module}（缺图）`,
-			ports: node.ports,
-			isModule: true,
-		};
-	});
-	return { nodes, edges: model.edges ?? [] };
+export function drawableChart(entry, charts) {
+	return drawMermaidNamed(entry.graph, (id) => charts.get(id)?.chart?.name);
 }
 
 /**
- * Write one chart's model and revision marker.
+ * Write one chart file.
  * @param {string} specDir - the absolute `.spec` directory.
- * @param {object} model - the validated model.
+ * @param {object} chart - the validated chart.
  * @returns {{ path: string, revision: string }} what was written.
  */
-export function writeChartModel(specDir, model) {
+export function writeChart(specDir, chart) {
 	ensureFlowsDir(specDir);
-	const path = chartModelPath(specDir, model.id);
+	const path = chartPath(specDir, chart.id);
+	const text = canonicalMarkdown(chart);
 	try {
-		writeFileSync(path, canonicalModel(model), 'utf8');
+		writeFileSync(path, text, 'utf8');
 	} catch (error) {
 		// A half-written landing must name the file that failed, or the caller cannot
 		// tell which chart is missing.
 		throw new Error(`落盘失败（${path}）：${error?.message ?? error}。修正后重新调用。`);
 	}
-	return { path, revision: revisionOf(model) };
+	return { path, revision: revisionOf(text) };
 }
 
 /**
- * Write one chart's brief. An empty text removes the file, so "no brief yet" has
- * exactly one representation on disk.
- * @param {string} specDir - the absolute `.spec` directory.
- * @param {string} id - the chart id.
- * @param {string} text - the brief content, or `''` to remove it.
- */
-export function writeChartBrief(specDir, id, text) {
-	const path = chartBriefPath(specDir, id);
-	if (typeof text !== 'string' || text.trim() === '') {
-		try {
-			unlinkSync(path);
-		} catch {
-			// A brief that never existed is already in the desired state.
-		}
-		return;
-	}
-	ensureFlowsDir(specDir);
-	try {
-		writeFileSync(path, text.endsWith('\n') ? text : `${text}\n`, 'utf8');
-	} catch (error) {
-		throw new Error(`落盘失败（${path}）：${error?.message ?? error}。修正后重新调用。`);
-	}
-}
-
-/**
- * Remove one chart and everything written for it.
+ * Remove one chart file.
  * @param {string} specDir - the absolute `.spec` directory.
  * @param {string} id - the chart id.
  */
 export function removeChartFiles(specDir, id) {
-	for (const path of [chartModelPath(specDir, id), chartImagePath(specDir, id), chartVectorPath(specDir, id), chartBriefPath(specDir, id)]) {
-		try {
-			unlinkSync(path);
-		} catch {
-			// Missing is already removed.
-		}
-	}
-}
-
-/**
- * Whether one chart's picture is older than its model, which is the only thing
- * the reader has to know about the cache.
- * @param {string} specDir - the absolute `.spec` directory.
- * @param {string} id - the chart id.
- * @returns {boolean} true when the picture needs redrawing.
- */
-export function pictureIsStale(specDir, id) {
-	const image = chartImagePath(specDir, id);
-	const vector = chartVectorPath(specDir, id);
-	const model = chartModelPath(specDir, id);
-	const picture = existsSync(image) ? image : (existsSync(vector) ? vector : undefined);
-	if (picture === undefined) return true;
 	try {
-		return readFileSync(picture).length === 0;
+		unlinkSync(chartPath(specDir, id));
 	} catch {
-		return true;
+		// Missing is already removed.
 	}
 }

@@ -13,16 +13,16 @@
 | docs/005-panel.md | 文档 | 界面：流程图页看到什么 |
 | docs/006-deployment.md | 文档 | 部署：怎么装、怎么排障 |
 | docs/007-architecture.md | 文档 | 架构：模块表与测试表 |
-| docs/008-cookbook.md | 文档 | 手册：加一个新的转换器 |
-| .spec/flows/overview.png | 图 | 这个仓库自己的流程总览：`npm run flow` 由 `doc-flow.mjs` 生成；模块图是同目录的 `check` / `land` / `view` |
+| docs/008-cookbook.md | 文档 | 手册：加一条新的校验规则 |
+| .spec/flows/overview.md | 图 | 这个仓库自己的流程总览，内嵌 mermaid：`npm run flow` 由 `doc-flow.mjs` 生成；模块图是同目录的 `check` / `land` / `view` |
 
 ## 开发规范规则
 
 - 改代码前判断本次改动是否让 README.md、`docs/` 或本文件过时；过时文档比没有文档更坏；判断不了时在回答末尾列出「可能已过时」清单。
 - 本文件只放文档索引与开发规范规则；现状归 README.md，概念与规则归 `docs/`，进度归提交历史与对话。
 - 同一事实只有一个出处：README.md 讲怎么用，`docs/` 讲是什么，发现两处各写一份就保留权威那份，另一处改成指针。
-- 插件产物（`.spec/flows/<id>.json` + `.png` + `.brief.md`）的规则只有一份实现：单图在 `flow.js`，
-  整册在 `flows.js`，排版在 `flow-svg.js`，路由在 `flows-api.js`，转换器探测在 `rasterize.js`。
+- 插件产物（`.spec/flows/<id>.md`：标题、范围、mermaid 块、简报）的规则只有一份实现：文件格式在 `chart-md.js`，
+  源码解析与单图规则在 `mermaid-graph.js`，整册在 `flows.js`，路由在 `flows-api.js`。
   改规则时补自测断言。
 - 界面只显示宿主返回的错误，图合不合格由 `flows.js` 判定。
 - 文档只写结论与硬事实，不解释；信息密度极高，一行一个结论，能进表格就进表格。
@@ -35,18 +35,18 @@
 - 状态折叠对无关事件返回同一个状态引用：投影的增量机制靠这个引用没变。
 - 进入命令无参时只回执：访谈由用户写下的内容触发。
 - 命令处理里问「这条命令进来之前是什么状态」时读已提交状态：`command/run` 早于处理器入日志。
-- 只用 Node 标准库；需要宿主能力时按等价实现内联。出图探测本机已有的转换器。
+- 只用 Node 标准库；需要宿主能力时按等价实现内联。mermaid 由宿主从本机 `node_modules` 取，仓库不自带。
 - 图标用显式颜色：它按数据地址渲染，拿不到宿主样式里的颜色。
 - 守卫的放行范围是草稿文件本身。
-- 模块框上的字在渲染时从被引用图取。
-- 图的画布按实际画出的东西定尺寸：回箭头会跑到最后一行下方，标签会被推到框外。
+- 模块框上的字在渲染时从被引用图取，文件里写的是子图 id。
+- 修订号是整份 md 文本的 sha256 前 16 位：标题、范围、源码、简报任何一处改动都换号。
 
 ## 验证
 
 - 在仓库根目录跑 `npm test`（= `node selftest.mjs && node landing-test.mjs`），两套断言全过才算改完。
-- 只改纯逻辑模块时至少跑 `node selftest.mjs`（70 项）；碰了落盘、守卫、命令、提醒、出图或路由接线，
-  必须连 `node landing-test.mjs`（13 项）一起跑——它用假上下文驱动真实 apply()，纯逻辑套件到不了
+- 只改纯逻辑模块时至少跑 `node selftest.mjs`（54 项）；碰了落盘、守卫、命令、提醒、源码解析或路由接线，
+  必须连 `node landing-test.mjs`（15 项）一起跑——它用假上下文驱动真实 apply()，纯逻辑套件到不了
   execute。
-- 改了排版、配色或折行后，看一眼真实生成的 PNG：`npm run flow` 出图后打开 `.spec/flows/overview.png`，确认框没被挤变形、箭头没穿过框。
+- 改了校验或图集后跑 `npm run flow`：它先校验再写盘，只写 `.md`；然后打开 `.spec/flows/overview.md`，在支持 mermaid 的预览里确认图能渲染。
 - 改了 `docs/` 后跑 `node /home/LMQ/.dsh/skills/docs-completion/scripts/check-docs.mjs --root .`，退出码 0 才算改完。
 - 改了图集规则后跑 `npm run flow`，它会先校验再写盘；校验不过会直接非零退出。
