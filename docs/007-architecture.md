@@ -8,20 +8,20 @@
 
 ```mermaid
 flowchart LR
-  CMD[/spec] --> STATE[state.js 投影]
-  STATE --> PROMPT[prompt.js spec:policy]
-  PROMPT --> MODEL[模型]
-  MODEL --> DRAFT[.spec/draft.md]
-  MODEL --> RESOLVE[spec_resolve]
-  RESOLVE --> FLOWS[flows.js 校验]
-  FLOWS --> FLOW[flow.js 校验]
-  FLOWS --> SVG[flow-svg.js 排版]
-  SVG --> RASTER[rasterize.js 转换]
-  RASTER --> DISK[.spec/flows/]
-  PAGE[client.js 流程图页] --> API[flows-api.js 路由]
+  CMD["/spec"] --> STATE["state.js 投影"]
+  STATE --> PROMPT["prompt.js spec:policy"]
+  PROMPT --> MODEL["模型"]
+  MODEL --> DRAFT[".spec/draft.md"]
+  MODEL --> RESOLVE["spec_resolve"]
+  RESOLVE --> FLOWS["flows.js 校验"]
+  FLOWS --> FLOW["flow.js 校验"]
+  FLOWS --> SVG["flow-svg.js 排版"]
+  SVG --> RASTER["rasterize.js 转换"]
+  RASTER --> DISK[".spec/flows/"]
+  PAGE["client.js 流程图页"] --> API["flows-api.js 路由"]
   API --> FLOWS
   API --> SVG
-  MODEL --> TOOLS[flow_read / flow_write]
+  MODEL --> TOOLS["flow_read / flow_write"]
   TOOLS --> FLOWS
 ```
 
