@@ -63,6 +63,10 @@ window.__ModuleLoader__.load({
 			sourceHint: '第一行 `flowchart LR`；节点一行一个 `n1["谁做了什么"]`；箭头一行一条 `n1 --> n2`，分叉写成 `n1 -->|条件| n2`。',
 			briefHint: '四节：目标 / 要做什么 / 验收 / 约束。人可以随便写，模型写的会被校验。',
 			renderFailed: '渲染失败',
+			zoomIn: '放大',
+			zoomOut: '缩小',
+			zoomFit: '适应宽度',
+			zoomHint: 'Ctrl/Cmd + 滚轮缩放',
 			mermaidFailed: 'mermaid 库没加载起来：宿主那条 mermaid.js 路由没通。',
 			unsavedSwitch: '这张图还没保存。先保存，或者切走前把改动丢掉。',
 			problems: '读不出来的文件',
@@ -98,6 +102,10 @@ window.__ModuleLoader__.load({
 			sourceHint: 'First line `flowchart LR`; one node per line, `n1["who does what"]`; one arrow per line, `n1 --> n2`, and a fork written `n1 -->|condition| n2`.',
 			briefHint: 'Four sections: goal / what to build / acceptance / constraints. A person may write freely; a model’s brief is validated.',
 			renderFailed: 'Render failed',
+			zoomIn: 'Zoom in',
+			zoomOut: 'Zoom out',
+			zoomFit: 'Fit width',
+			zoomHint: 'Ctrl/Cmd + wheel to zoom',
 			mermaidFailed: 'The mermaid library did not load: the Host route for mermaid.js is not answering.',
 			unsavedSwitch: 'This chart has unsaved changes. Save them, or reload the chart to drop them.',
 			problems: 'Unreadable files',
@@ -288,6 +296,15 @@ window.__ModuleLoader__.load({
 				background: 'var(--dsw-alias-bg-base)',
 				boxSizing: 'border-box',
 			},
+			// 缩放按钮成组跟着预览走，百分比放在两个按钮中间。
+			zoom: { display: 'flex', alignItems: 'center', gap: 4, flex: '0 0 auto' },
+			zoomBadge: {
+				minWidth: 38,
+				textAlign: 'center',
+				fontSize: 11,
+				color: 'var(--dsw-alias-label-secondary)',
+				fontVariantNumeric: 'tabular-nums',
+			},
 			previewEmpty: {
 				flex: 1,
 				minHeight: 0,
@@ -467,6 +484,14 @@ window.__ModuleLoader__.load({
 			const [sourceEdited, setSourceEdited] = React.useState(false);
 			const [svg, setSvg] = React.useState('');
 			const [renderError, setRenderError] = React.useState('');
+			// 图比一屏宽时不放大就得左右滚，缩小时又看不清字。倍数是纯显示态：
+			// 不进文件、不进保存载荷，切图即复位。
+			const [zoom, setZoom] = React.useState(1);
+			const previewRef = React.useRef(null);
+			// 缩放锚点：放大前视口中心在图上的哪个比例位置，缩放后仍停在那里。
+			const zoomAnchor = React.useRef(null);
+			// 倍数跟着这张图走：同一个 id 重新载入（保存之后）不该把倍数清掉。
+			const zoomChart = React.useRef('');
 			// null follows the width: a narrow pane opens on the source, a wide one on
 			// the picture. The toggle pins the choice.
 			const [mode, setMode] = React.useState(null);
@@ -491,7 +516,11 @@ window.__ModuleLoader__.load({
 					+ 'html[data-spec-flows-view] [data-width-handle]{display:none}'
 					// The drawn picture keeps its natural size for mermaid and is scaled to
 					// the column it is read in; `height:auto` keeps that scale uniform.
-					+ 'html[data-spec-flows-view] [data-spec-preview] svg{max-width:100%;height:auto;display:block;margin:0 auto}';
+					+ 'html[data-spec-flows-view] [data-spec-preview] svg{max-width:100%;height:auto;display:block;margin:0 auto}'
+					// 放大之后图比视口宽，让它按倍数铺开并在预览框里滚动；倍数为 1 时
+					// 走上面那条，和没加缩放时一模一样。
+					+ 'html[data-spec-flows-view] [data-spec-preview][data-spec-zoomed] svg{'
+					+ 'max-width:none;width:calc(100% * var(--spec-zoom,1));height:auto;margin:0}';
 				document.head.appendChild(style);
 				return () => {
 					root.removeAttribute('data-spec-flows-view');
@@ -564,6 +593,13 @@ window.__ModuleLoader__.load({
 				setBaseRevision(one.revision);
 				setSourceEdited(false);
 				setDirty(false);
+				// 换了一张图就是换了一张画，上一张的倍数在这里没有意义；同一张图
+				// 保存后重新载入不算换图，倍数留着，否则每次保存都要重新放大一遍。
+				if (zoomChart.current !== want) {
+					zoomChart.current = want;
+					zoomAnchor.current = null;
+					setZoom(1);
+				}
 			}, [sessionId]);
 
 			React.useEffect(() => { void load(); }, [load]);
@@ -641,6 +677,70 @@ window.__ModuleLoader__.load({
 					window.clearTimeout(timer);
 				};
 			}, [text, dark, t]);
+
+			/** 缩放档位：1 表示「适应宽度」，往上按一半一档涨，最小到四分之一。 */
+			const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
+
+			/**
+			 * 把视口中心落在图上的位置记下来，换完倍数再滚回同一处。
+			 * 不记锚点的话，放大总是从左上角开始，读者看的框会跑出视口。
+			 */
+			const rememberAnchor = () => {
+				const box = previewRef.current;
+				if (box === null) return;
+				const width = box.scrollWidth || 1;
+				const height = box.scrollHeight || 1;
+				zoomAnchor.current = {
+					x: (box.scrollLeft + box.clientWidth / 2) / width,
+					y: (box.scrollTop + box.clientHeight / 2) / height,
+				};
+			};
+
+			/**
+			 * 换一个缩放倍数。
+			 * @param {number} next - 目标倍数。
+			 */
+			const applyZoom = (next) => {
+				const clamped = Math.min(ZOOM_STEPS[ZOOM_STEPS.length - 1], Math.max(ZOOM_STEPS[0], next));
+				rememberAnchor();
+				setZoom(clamped);
+			};
+
+			/**
+			 * 往上或往下走一档。
+			 * @param {number} direction - 1 放大，-1 缩小。
+			 */
+			const stepZoom = (direction) => {
+				const at = ZOOM_STEPS.findIndex((step) => step >= zoom - 0.001);
+				const index = at === -1 ? ZOOM_STEPS.length - 1 : at;
+				const next = ZOOM_STEPS[Math.min(ZOOM_STEPS.length - 1, Math.max(0, index + direction))];
+				applyZoom(next);
+			};
+
+			// 换倍数后把滚动位置挪回锚点。放在绘制之后、按 zoom 触发一次。
+			React.useEffect(() => {
+				const box = previewRef.current;
+				const anchor = zoomAnchor.current;
+				if (box === null || anchor === null) return;
+				zoomAnchor.current = null;
+				box.scrollLeft = anchor.x * box.scrollWidth - box.clientWidth / 2;
+				box.scrollTop = anchor.y * box.scrollHeight - box.clientHeight / 2;
+			}, [zoom]);
+
+			// Ctrl/Cmd + 滚轮缩放：手不离指针就能看清一个框。不按修饰键时保持原生滚动，
+			// 否则在这个页面上忽然滚不动了。
+			React.useEffect(() => {
+				const box = previewRef.current;
+				if (box === null) return undefined;
+				const onWheel = (event) => {
+					if (!event.ctrlKey && !event.metaKey) return;
+					event.preventDefault();
+					rememberAnchor();
+					stepZoom(event.deltaY < 0 ? 1 : -1);
+				};
+				box.addEventListener('wheel', onWheel, { passive: false });
+				return () => box.removeEventListener('wheel', onWheel);
+			}, [shown, svg]);
 
 			/** Save the four edited fields, guarded by the revision that was loaded. */
 			const save = React.useCallback(async () => {
@@ -767,6 +867,36 @@ window.__ModuleLoader__.load({
 								}),
 							),
 						h('span', { style: styles.spacer }),
+						// 缩放只在看图时有意义；停在源码上时不显示这三个控件。
+						shown === 'preview' && svg !== ''
+							? h('div', { style: styles.zoom },
+								h('button', {
+									type: 'button',
+									style: styles.button,
+									title: t('zoomOut'),
+									'aria-label': t('zoomOut'),
+									disabled: zoom <= ZOOM_STEPS[0],
+									onClick: () => stepZoom(-1),
+								}, '−'),
+								// 中间那颗永远显示百分比，点一下回到「适应宽度」：按钮宽度不变，
+								// 行里的位置就不会跟着缩放跳。
+								h('button', {
+									type: 'button',
+									style: { ...styles.zoomBadge, ...styles.button, minWidth: 46 },
+									title: t('zoomFit'),
+									'aria-label': t('zoomFit'),
+									onClick: () => applyZoom(1),
+								}, `${Math.round(zoom * 100)}%`),
+								h('button', {
+									type: 'button',
+									style: styles.button,
+									title: t('zoomIn'),
+									'aria-label': t('zoomIn'),
+									disabled: zoom >= ZOOM_STEPS[ZOOM_STEPS.length - 1],
+									onClick: () => stepZoom(1),
+								}, '+'),
+							)
+							: null,
 						h('button', {
 							type: 'button',
 							style: styles.button,
@@ -795,13 +925,16 @@ window.__ModuleLoader__.load({
 									: svg === ''
 										? h('div', { style: styles.previewEmpty }, renderError === '' && text.trim() !== '' ? t('loading') : '')
 										: h('div', {
+											ref: previewRef,
 											'data-spec-preview': '',
-											style: styles.preview,
+											// 倍数 1 时不落这个属性，让预览走「适应宽度」那条规则。
+											'data-spec-zoomed': zoom === 1 ? undefined : '',
+											style: zoom === 1 ? styles.preview : { ...styles.preview, '--spec-zoom': String(zoom) },
 											dangerouslySetInnerHTML: { __html: svg },
 										}),
 							// 渲染失败的红字贴着预览放，因为要改的是上面那段源码。
 							renderError === '' ? null : h('div', { style: { ...styles.error, marginTop: 8, marginBottom: 0 } }, `${t('renderFailed')}：${renderError}`),
-							draft === null ? null : h('div', { style: { ...styles.hint, marginTop: 8, marginBottom: 0 } }, `${t('sourceHint')} ${t('keyboard')}`),
+							draft === null ? null : h('div', { style: { ...styles.hint, marginTop: 8, marginBottom: 0 } }, `${t('sourceHint')} ${t('keyboard')}${svg === '' ? '' : ` ${t('zoomHint')}`}`),
 						),
 						h('div', { style: narrow ? styles.stackedBrief : styles.brief },
 							draft === null ? null : h('div', { style: styles.paneCol },
