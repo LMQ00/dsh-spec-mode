@@ -66,7 +66,7 @@ window.__ModuleLoader__.load({
 			zoomIn: '放大',
 			zoomOut: '缩小',
 			zoomFit: '适应宽度',
-			zoomHint: 'Ctrl/Cmd + 滚轮缩放',
+			zoomHint: 'Ctrl/Cmd + 滚轮缩放；放大后按住图拖动可平移',
 			mermaidFailed: 'mermaid 库没加载起来：宿主那条 mermaid.js 路由没通。',
 			unsavedSwitch: '这张图还没保存。先保存，或者切走前把改动丢掉。',
 			problems: '读不出来的文件',
@@ -105,7 +105,7 @@ window.__ModuleLoader__.load({
 			zoomIn: 'Zoom in',
 			zoomOut: 'Zoom out',
 			zoomFit: 'Fit width',
-			zoomHint: 'Ctrl/Cmd + wheel to zoom',
+			zoomHint: 'Ctrl/Cmd + wheel to zoom; drag the picture to pan once it is enlarged',
 			mermaidFailed: 'The mermaid library did not load: the Host route for mermaid.js is not answering.',
 			unsavedSwitch: 'This chart has unsaved changes. Save them, or reload the chart to drop them.',
 			problems: 'Unreadable files',
@@ -296,6 +296,9 @@ window.__ModuleLoader__.load({
 				background: 'var(--dsw-alias-bg-base)',
 				boxSizing: 'border-box',
 			},
+			// 放大后可拖动平移：抓手光标是唯一的提示，说明这张图能拽。
+			pannable: { cursor: 'grab', touchAction: 'none' },
+			panning: { cursor: 'grabbing', touchAction: 'none', userSelect: 'none' },
 			// 缩放按钮成组跟着预览走，百分比放在两个按钮中间。
 			zoom: { display: 'flex', alignItems: 'center', gap: 4, flex: '0 0 auto' },
 			zoomBadge: {
@@ -727,6 +730,65 @@ window.__ModuleLoader__.load({
 				box.scrollTop = anchor.y * box.scrollHeight - box.clientHeight / 2;
 			}, [zoom]);
 
+			// 放大之后图比视口大，按住图拖就是平移：滚轮只能走一条轴，而看一张宽图
+			// 常常要同时往右和往下。倍数 1 时图放得下，拖动不做任何事，也不显示抓手。
+			const [panning, setPanning] = React.useState(false);
+			// 只有图真的超出视口时才谈得上平移：缩到 100% 以下图放得下，
+			// 这时给抓手光标等于许诺一个做不到的动作。
+			const [overflowing, setOverflowing] = React.useState(false);
+			React.useEffect(() => {
+				const box = previewRef.current;
+				if (box === null) {
+					setOverflowing(false);
+					return undefined;
+				}
+				const measure = () => setOverflowing(box.scrollWidth > box.clientWidth + 1 || box.scrollHeight > box.clientHeight + 1);
+				// 换倍数后布局要到下一帧才落定，先量一次再补一帧复核。
+				measure();
+				const timer = window.setTimeout(measure, 60);
+				return () => window.clearTimeout(timer);
+			}, [zoom, svg, shown]);
+
+			React.useEffect(() => {
+				const box = previewRef.current;
+				if (box === null || !overflowing) return undefined;
+				// 记录按下点与当时的滚动位置；移动时把差值反向加到滚动上，
+				// 于是图跟着指针走，而不是指针跟着图。
+				let from = null;
+				const onDown = (event) => {
+					// 只认左键与触控；中键留给浏览器的自动滚动，右键留给菜单。
+					if (event.button !== 0) return;
+					// 从按钮上开始按不算拖图。
+					if (event.target instanceof Element && event.target.closest('button,a,input,textarea') !== null) return;
+					from = { x: event.clientX, y: event.clientY, left: box.scrollLeft, top: box.scrollTop };
+					setPanning(true);
+					box.setPointerCapture?.(event.pointerId);
+				};
+				const onMove = (event) => {
+					if (from === null) return;
+					event.preventDefault();
+					box.scrollLeft = from.left - (event.clientX - from.x);
+					box.scrollTop = from.top - (event.clientY - from.y);
+				};
+				const onUp = (event) => {
+					if (from === null) return;
+					from = null;
+					setPanning(false);
+					box.releasePointerCapture?.(event.pointerId);
+				};
+				box.addEventListener('pointerdown', onDown);
+				box.addEventListener('pointermove', onMove);
+				box.addEventListener('pointerup', onUp);
+				box.addEventListener('pointercancel', onUp);
+				return () => {
+					box.removeEventListener('pointerdown', onDown);
+					box.removeEventListener('pointermove', onMove);
+					box.removeEventListener('pointerup', onUp);
+					box.removeEventListener('pointercancel', onUp);
+					setPanning(false);
+				};
+			}, [shown, svg, zoom, overflowing]);
+
 			// Ctrl/Cmd + 滚轮缩放：手不离指针就能看清一个框。不按修饰键时保持原生滚动，
 			// 否则在这个页面上忽然滚不动了。
 			React.useEffect(() => {
@@ -929,7 +991,13 @@ window.__ModuleLoader__.load({
 											'data-spec-preview': '',
 											// 倍数 1 时不落这个属性，让预览走「适应宽度」那条规则。
 											'data-spec-zoomed': zoom === 1 ? undefined : '',
-											style: zoom === 1 ? styles.preview : { ...styles.preview, '--spec-zoom': String(zoom) },
+											style: zoom === 1
+												? styles.preview
+												: {
+													...styles.preview,
+													'--spec-zoom': String(zoom),
+													...(overflowing ? (panning ? styles.panning : styles.pannable) : null),
+												},
 											dangerouslySetInnerHTML: { __html: svg },
 										}),
 							// 渲染失败的红字贴着预览放，因为要改的是上面那段源码。
