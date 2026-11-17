@@ -18,7 +18,7 @@
 | 这条规则要看什么 | 写在哪 |
 | --- | --- |
 | 一行源码的形状：括号、箭头、模块框的第一行、某条端口 | `mermaid-graph.js` 的 `parseMermaid()` |
-| 整张图：起点、分叉条件、重复说明、重复连线 | `mermaid-graph.js` 的 `validateGraph()` |
+| 整张图：起点、箭头标注、重复说明、重复连线 | `mermaid-graph.js` 的 `validateGraph()` |
 | 整册图集：overview、引用、成环、删除、孤儿 | `flows.js` 的 `validateCollection()` |
 | 文件四块与字段长度：标题、范围、id | `chart-md.js` 的 `parseChartMarkdown()`、`flows.js` 的 `validateChart()` |
 

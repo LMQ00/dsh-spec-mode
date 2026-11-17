@@ -366,19 +366,16 @@ check('a diagram has exactly one entry', () => {
 	}));
 	assert.equal(twoEnds.ok, true, JSON.stringify(twoEnds.errors));
 
+	// 箭头上的字是可选标注：分叉不写条件照收，一路直行写给时间点也照收。
 	const silentBranch = validateChart(chartOf({
 		source: 'flowchart LR\n  A["a"]\n  B["b"]\n  C["c"]\n  A --> B\n  A --> C\n',
 	}));
-	assert.equal(silentBranch.ok, false);
-	assert.ok(silentBranch.errors[0].includes('条件'), silentBranch.errors.join('；'));
+	assert.equal(silentBranch.ok, true, JSON.stringify(silentBranch.errors));
 
-	// A condition on the only way out reads as "there is another way", which the
-	// picture does not show.
 	const lonelyCondition = validateChart(chartOf({
 		source: 'flowchart LR\n  A["a"]\n  B["b"]\n  A -->|一定| B\n',
 	}));
-	assert.equal(lonelyCondition.ok, false);
-	assert.ok(lonelyCondition.errors[0].includes('不用写条件'), lonelyCondition.errors.join('；'));
+	assert.equal(lonelyCondition.ok, true, JSON.stringify(lonelyCondition.errors));
 
 	// Two arrows out of one box under the same words cannot be told apart.
 	const sameWords = validateChart(chartOf({

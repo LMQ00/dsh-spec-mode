@@ -48,7 +48,7 @@ flowchart LR
 
 ### 源码 `mermaid-graph.js`
 
-拥有的：`mermaid` 块的解析与单图规则——方向头、节点行、模块框与端口、连线与分叉条件、节点 id 与说明、起点、回箭头识别；把图写回源码。导出 `parseMermaid()`、`validateGraph()`、`drawMermaid()`、`drawMermaidNamed()`、`backEdgesOf()`。
+拥有的：`mermaid` 块的解析与单图规则——方向头、节点行、模块框与端口、连线与箭头标注、节点 id 与说明、起点、回箭头识别；把图写回源码。导出 `parseMermaid()`、`validateGraph()`、`drawMermaid()`、`drawMermaidNamed()`、`backEdgesOf()`。
 
 输入：一段源码，不知道图集里有几张图；输出：`{ direction, nodes, edges }` 或带行号的错误。模块框要能对上图集，需要调用方传 `knownModules`。
 
@@ -122,7 +122,7 @@ flowchart LR
 | `advisories.js` | 对 `AGENTS.md` 的写入做行数与进度两条不阻止写入的提醒 |
 | `brief.js` | 校验与渲染简报的四个小节，并把写好的简报读回结构 |
 | `chart-md.js` | 读写一份图的 Markdown：四块、规范化文本、修订号 |
-| `mermaid-graph.js` | 解析 `mermaid` 源码，校验单张图的节点、模块框、连线、分叉条件与起点，把图写回源码 |
+| `mermaid-graph.js` | 解析 `mermaid` 源码，校验单张图的节点、模块框、连线、箭头标注与起点，把图写回源码 |
 | `flows.js` | 校验整册图集：有 overview、引用指得到、不成环；读写文件，算修订号，识别种类 |
 | `flows-api.js` | 提供 `/spec/flows` 下五个 JSON 接口与 mermaid 库路由给流程图页用 |
 | `client.js` | 流程图页：列图集、渲染或编辑源码、改简报、保存、新建、删除 |

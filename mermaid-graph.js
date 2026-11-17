@@ -339,17 +339,11 @@ export function validateGraph(graph, options = {}) {
 		errors.push(`有 ${starts.length} 个起点（${starts.join('、')}）。一条流程只从一个框开始，先合并成一个起点`);
 	}
 
-	const branching = new Map();
-	for (const edge of edges) branching.set(edge.from, (branching.get(edge.from) ?? 0) + 1);
+	// 箭头上的字是可选标注：写条件、写时间、写理由都行，不写也行。它读不读得懂
+	// 由下面这套词表管，与框上的字同一套；两条出边写成一模一样才是真读不出来。
 	const conditions = new Map();
 	for (const edge of edges) {
 		const where = edge.line === undefined ? `${edge.from} → ${edge.to}` : `第 ${edge.line} 行`;
-		if (branching.get(edge.from) > 1 && edge.when === undefined) {
-			errors.push(`${where}: ${edge.from} 有两条以上出边，这条必须写条件——分叉条件只存在于图上，不写清楚，只看文字描述的人就对不上`);
-		}
-		if (branching.get(edge.from) === 1 && edge.when !== undefined) {
-			errors.push(`${where}: ${edge.from} 只有这一条出边，不是分叉，不用写条件——写上去像在说「还有别的走法」，图上却只有一根箭头`);
-		}
 		// A condition is read off the picture the same way a box is, so it answers
 		// to the same rules: a sentence about what happens, not why.
 		if (edge.when !== undefined) {
