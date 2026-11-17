@@ -521,9 +521,10 @@ window.__ModuleLoader__.load({
 					// the column it is read in; `height:auto` keeps that scale uniform.
 					+ 'html[data-spec-flows-view] [data-spec-preview] svg{max-width:100%;height:auto;display:block;margin:0 auto}'
 					// 放大之后图比视口宽，让它按倍数铺开并在预览框里滚动；倍数为 1 时
-					// 走上面那条，和没加缩放时一模一样。
+					// 走上面那条，和没加缩放时一模一样。mermaid 会把自己的自然宽度写进
+					// svg 的 style，落到元素上的 max-width 压过这条规则，所以带 !important。
 					+ 'html[data-spec-flows-view] [data-spec-preview][data-spec-zoomed] svg{'
-					+ 'max-width:none;width:calc(100% * var(--spec-zoom,1));height:auto;margin:0}';
+					+ 'max-width:none!important;width:calc(100% * var(--spec-zoom,1));height:auto;margin:0}';
 				document.head.appendChild(style);
 				return () => {
 					root.removeAttribute('data-spec-flows-view');
@@ -681,43 +682,52 @@ window.__ModuleLoader__.load({
 				};
 			}, [text, dark, t]);
 
-			/** 缩放档位：1 表示「适应宽度」，往上按一半一档涨，最小到四分之一。 */
-			const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
+			/** 缩放档位：1 表示「适应宽度」；往上一档约 ×1.5，最小四分之一，最大 32 倍。 */
+			const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32];
 
 			/**
-			 * 把视口中心落在图上的位置记下来，换完倍数再滚回同一处。
+			 * 把预览框里某一点落在图上的位置记下来，换完倍数再滚回同一处。
 			 * 不记锚点的话，放大总是从左上角开始，读者看的框会跑出视口。
+			 * @param {{x: number, y: number}} [point] - 视口坐标里要钉住的那一点；
+			 *   不给就是预览框中心，那是按钮缩放用的锚点。
 			 */
-			const rememberAnchor = () => {
+			const rememberAnchor = (point) => {
 				const box = previewRef.current;
 				if (box === null) return;
 				const width = box.scrollWidth || 1;
 				const height = box.scrollHeight || 1;
+				const rect = box.getBoundingClientRect();
+				const px = point === undefined ? box.clientWidth / 2 : point.x - rect.left;
+				const py = point === undefined ? box.clientHeight / 2 : point.y - rect.top;
 				zoomAnchor.current = {
-					x: (box.scrollLeft + box.clientWidth / 2) / width,
-					y: (box.scrollTop + box.clientHeight / 2) / height,
+					x: (box.scrollLeft + px) / width,
+					y: (box.scrollTop + py) / height,
+					px,
+					py,
 				};
 			};
 
 			/**
 			 * 换一个缩放倍数。
 			 * @param {number} next - 目标倍数。
+			 * @param {{x: number, y: number}} [point] - 钉住的视口坐标，默认预览框中心。
 			 */
-			const applyZoom = (next) => {
+			const applyZoom = (next, point) => {
 				const clamped = Math.min(ZOOM_STEPS[ZOOM_STEPS.length - 1], Math.max(ZOOM_STEPS[0], next));
-				rememberAnchor();
+				rememberAnchor(point);
 				setZoom(clamped);
 			};
 
 			/**
 			 * 往上或往下走一档。
 			 * @param {number} direction - 1 放大，-1 缩小。
+			 * @param {{x: number, y: number}} [point] - 钉住的视口坐标，默认预览框中心。
 			 */
-			const stepZoom = (direction) => {
+			const stepZoom = (direction, point) => {
 				const at = ZOOM_STEPS.findIndex((step) => step >= zoom - 0.001);
 				const index = at === -1 ? ZOOM_STEPS.length - 1 : at;
 				const next = ZOOM_STEPS[Math.min(ZOOM_STEPS.length - 1, Math.max(0, index + direction))];
-				applyZoom(next);
+				applyZoom(next, point);
 			};
 
 			// 换倍数后把滚动位置挪回锚点。放在绘制之后、按 zoom 触发一次。
@@ -726,8 +736,8 @@ window.__ModuleLoader__.load({
 				const anchor = zoomAnchor.current;
 				if (box === null || anchor === null) return;
 				zoomAnchor.current = null;
-				box.scrollLeft = anchor.x * box.scrollWidth - box.clientWidth / 2;
-				box.scrollTop = anchor.y * box.scrollHeight - box.clientHeight / 2;
+				box.scrollLeft = anchor.x * box.scrollWidth - anchor.px;
+				box.scrollTop = anchor.y * box.scrollHeight - anchor.py;
 			}, [zoom]);
 
 			// 放大之后图比视口大，按住图拖就是平移：滚轮只能走一条轴，而看一张宽图
@@ -790,19 +800,19 @@ window.__ModuleLoader__.load({
 			}, [shown, svg, zoom, overflowing]);
 
 			// Ctrl/Cmd + 滚轮缩放：手不离指针就能看清一个框。不按修饰键时保持原生滚动，
-			// 否则在这个页面上忽然滚不动了。
+			// 否则在这个页面上忽然滚不动了。处理器按当前的 `zoom` 重新挂一次——
+			// 依赖里漏掉它，处理器就一直从挂载时那一档算，每滚一格都是同一个结果。
 			React.useEffect(() => {
 				const box = previewRef.current;
 				if (box === null) return undefined;
 				const onWheel = (event) => {
 					if (!event.ctrlKey && !event.metaKey) return;
 					event.preventDefault();
-					rememberAnchor();
-					stepZoom(event.deltaY < 0 ? 1 : -1);
+					stepZoom(event.deltaY < 0 ? 1 : -1, { x: event.clientX, y: event.clientY });
 				};
 				box.addEventListener('wheel', onWheel, { passive: false });
 				return () => box.removeEventListener('wheel', onWheel);
-			}, [shown, svg]);
+			}, [shown, svg, zoom]);
 
 			/** Save the four edited fields, guarded by the revision that was loaded. */
 			const save = React.useCallback(async () => {
@@ -940,11 +950,12 @@ window.__ModuleLoader__.load({
 									disabled: zoom <= ZOOM_STEPS[0],
 									onClick: () => stepZoom(-1),
 								}, '−'),
-								// 中间那颗永远显示百分比，点一下回到「适应宽度」：按钮宽度不变，
-								// 行里的位置就不会跟着缩放跳。
+								// 中间那颗永远显示百分比，点一下回到「适应宽度」：宽度按最大档
+								// 「3200%」留够，行里的位置就不跟着缩放跳。样式按 key 的先后
+								// 落地，`font` 简写会把字号重置回继承值，所以字号写在它后面。
 								h('button', {
 									type: 'button',
-									style: { ...styles.zoomBadge, ...styles.button, minWidth: 46 },
+									style: { ...styles.button, ...styles.zoomBadge, minWidth: 70, fontSize: 11 },
 									title: t('zoomFit'),
 									'aria-label': t('zoomFit'),
 									onClick: () => applyZoom(1),
