@@ -1,6 +1,6 @@
 {
   "name": "dsh-spec-mode",
-  "version": "4.2.2",
+  "version": "4.2.3",
   "type": "module",
   "scripts": {
     "test": "node selftest.mjs && node landing-test.mjs",
