@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { apply } from './index.js';
+import { parseMermaid, validateGraph } from './mermaid-graph.js';
 
 let passed = 0;
 function check(label, fn) {
@@ -180,6 +181,15 @@ check('the prompt section is empty while the mode is off and non-empty while it 
 	assert.ok(text.includes('.spec/draft.md'));
 	assert.ok(text.includes('## 简报'));
 	assert.ok(text.includes('flow'));
+	// The section lands in the system prompt of every request while the mode is on,
+	// so its length is a product constraint, not a style preference.
+	assert.ok(text.length <= 2000, `spec:policy 有 ${text.length} 字符，超过 2000 预算`);
+	const example = /```(?:mermaid)?\n([\s\S]*?)\n```/.exec(text);
+	assert.ok(example !== null, '协议里带一个 mermaid 示例');
+	const parsed = parseMermaid(example[1]);
+	assert.ok(parsed.ok, `示例要能解析：${parsed.errors?.join('；')}`);
+	const checked = validateGraph(parsed.graph, { knownModules: new Set(['check']) });
+	assert.ok(checked.ok, `示例要过单图校验：${checked.errors?.join('；')}`);
 	assert.equal(section.text({}), '');
 });
 

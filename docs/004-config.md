@@ -6,7 +6,7 @@
 
 | 区 | 装什么 | 在哪 |
 | --- | --- | --- |
-| 访谈协议 | 一整段 `spec:policy` 提示词：前提、每轮目标、要拿全的四项、图集的形状、每张图怎么画、简报怎么写、完成后的落盘、访谈之外也能改图 | `prompt.js` 的 `specModeContext()` |
+| 访谈协议 | 一整段 `spec:policy` 提示词：访谈、图集、简报、落盘、访谈之外 | `prompt.js` 的 `specModeContext()` |
 | 落盘后的指引 | 一句「现在只剩一步：写 AGENTS.md」 | `index.js` 里 `spec_resolve` 的 `render` |
 | 草稿提醒 | 新会话看到的那段「草稿可能已落盘」 | `prompt.js` 的 `pendingDraftNotice()` |
 | 命令描述 | 斜杠菜单里显示的一行 | `index.js` 的 `commands.register` |
