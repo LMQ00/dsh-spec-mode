@@ -86,12 +86,8 @@ const PROMPT_SECTION_NAME = 'spec:policy';
 const CONTEXT_SUMMARY_MAX_CHARS = 120;
 
 const EXIT_DESCRIPTION =
-	'访谈完成、且用户确认过整体回述后调用：先校验整册图集，再弹确认框，用户批准后落盘并退出 spec mode。'
-	+ '`charts` 是本次改动的图，每张自带 id、name、scope、source（mermaid 源码）与可选 brief——只写这些，'
-	+ '未提交的图原样留在盘上；`removed` 列出本次删掉的图 id，被引用的图不能删。'
-	+ '每张图落在 `.spec/flows/<id>.md` 这一份文件里：标题、范围、mermaid 块、简报。'
-	+ '用户选「退出并落盘」→ 写这些文件、删掉草稿、退出模式、工作树恢复可写；'
-	+ '选「继续访谈」→ 模式不变、工作树仍只读，等用户补充需求后继续更新草稿。';
+	'访谈完成、用户确认整体回述后调用：校验整册图集并弹确认框，批准后落盘 `.spec/flows/`、删草稿、退出模式。'
+	+ '`charts` 只放本次新写或改过的图，`removed` 列要删的图 id。';
 
 /* ------------------------------------------------------------------ */
 /* Tool parameter schema                                               */
@@ -109,11 +105,9 @@ function texts(description) {
 
 /** How a chart's mermaid source is written, in the words the model reads. */
 const SOURCE_DESCRIPTION =
-	'这张图的 mermaid 源码，整块就是文件里的图。'
-	+ '第一行 `flowchart LR`；节点一行一个，写 `n1["谁做了什么"]`；'
-	+ '模块框写 `n4[["check<br/>入：什么条件进来<br/>出：出去之后是什么状态"]]`，引号里第一行是被引用图的 id，后面每行一条端口；'
-	+ '箭头一行一条，写 `n1 --> n2`，分叉写成 `n1 -->|条件| n2`。'
-	+ '只允许一个起点；要重复的一步，用回箭头指回重来的那个框。';
+	'mermaid 源码：第一行 `flowchart LR`；节点写 `n1["谁做了什么"]`；'
+	+ '模块框写 `n4[["<子图 id><br/>入：…<br/>出：…"]]`；连线写 `n1 --> n2`，条件写 `n1 -->|条件| n2`。'
+	+ '只允许一个起点；重试用回箭头。';
 
 /**
  * The JSON Schema for one chart, shared by every tool that takes a chart so a
@@ -125,11 +119,11 @@ function chartShape() {
 		type: 'object',
 		additionalProperties: false,
 		properties: {
-			id: text('这张图的编号，也是文件名：小写字母开头，只用小写字母、数字与短横，最长 24 位。一经落盘不再改名。id 为 overview 的那张就是产品全貌，整册恰好一张。'),
-			name: text('显示名，写进文件第一行，也画在引用它的模块框上。作用变了就改它。'),
-			scope: text('一行写死这张图从哪一步到哪一步。写「本次」「相关」这类无边界说法会被拒。'),
+			id: text('文件名与图集编号：小写字母开头，只用小写字母、数字与短横，最长 24 位；`overview` 是产品全貌，全册一张。'),
+			name: text('显示名，写进第一行，也显示在引用它的模块框上。'),
+			scope: text('一行写死从哪一步到哪一步；不用「本次」「相关」这类无边界说法。'),
 			source: text(SOURCE_DESCRIPTION),
-			brief: text('可选。这张图的需求简报，Markdown，四节：### 目标、### 要做什么、### 验收、### 约束。人不写就留空，模型在访谈里补。'),
+			brief: text('可选，四节：### 目标、### 要做什么、### 验收、### 约束。人不写就留空。'),
 		},
 		required: ['id', 'name', 'scope', 'source'],
 	};
@@ -155,13 +149,13 @@ function exitParameters() {
 		properties: {
 			charts: {
 				type: 'array',
-				description: '本次改动的图，一张一项。未出现在这里的图保持盘上原样。',
+				description: '本次新写或改过的图，一张一项；没提交的图保持盘上原样。',
 				items: chartShape(),
 			},
 			removed: {
 				type: 'array',
 				items: { type: 'string' },
-				description: '本次删掉的图 id。被别的图引用的、以及唯一的 overview，都会被拒。',
+				description: '本次删掉的图 id；被引用的图与 overview 不能删。',
 			},
 		},
 		required: ['charts'],
@@ -587,8 +581,7 @@ export function apply(ctx) {
 	ctx.tools.register({
 		name: READ_TOOL_NAME,
 		description:
-			'读 .spec/flows/ 这一册流程图：有哪些图、谁引用谁、每张图的 mermaid 源码与简报。不带 id 时返回清单；带 id 时返回那份文件的全文。'
-			+ '不在 spec mode 时也能用；它只读，不改盘上任何东西。',
+			'读 .spec/flows/ 图集：不带 id 返回清单与引用关系，带 id 返回那张图的源码与简报。不在 spec mode 时也能用，只读。',
 		parameters: {
 			type: 'object',
 			additionalProperties: false,
@@ -654,9 +647,8 @@ export function apply(ctx) {
 	ctx.tools.register({
 		name: WRITE_TOOL_NAME,
 		description:
-			'改 .spec/flows/ 里的一张图：提交它的完整内容与可选简报，校验通过才写盘。'
-			+ '不在 spec mode 时也能用；spec mode 开着时不行——那时图集只能走 spec_resolve 的确认框。'
-			+ '传 revision 可以要求盘上仍是那一版，不一致就报冲突而不是覆盖。',
+			'写 .spec/flows/ 里的一张图，校验通过才落盘；spec mode 开着时不能用。'
+			+ '`revision` 与盘上不一致就报冲突。',
 		parameters: {
 			type: 'object',
 			additionalProperties: false,
